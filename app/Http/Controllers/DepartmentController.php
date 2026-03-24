@@ -19,7 +19,7 @@ class DepartmentController extends Controller
     public function index()
     {
         $this->authorize('view', Department::class);
-        $departments = Department::with(['users', 'assets'])->orderBy('name')->paginate(15);
+        $departments = Department::with(['users', 'assets', 'property'])->orderBy('name')->paginate(15);
 
         return view('departments.index', ['departments' => $departments]);
     }

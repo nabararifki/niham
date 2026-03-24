@@ -19,7 +19,7 @@ class CategoryController extends Controller
     public function index()
     {
         $this->authorize('view', Category::class);
-        $categories = Category::with(['assets'])->orderBy('name')->paginate(15);
+        $categories = Category::with(['assets', 'property'])->orderBy('name')->paginate(15);
 
         return view('categories.index', ['categories' => $categories]);
     }

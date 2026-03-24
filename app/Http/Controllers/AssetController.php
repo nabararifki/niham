@@ -64,9 +64,9 @@ class AssetController extends Controller
             $query->latest();
         }
 
-        $assets = $query->with(['category', 'department'])->paginate(15)->withQueryString();
-        $categories = Category::all();
-        $departments = Department::all();
+        $assets = $query->with(['category', 'department', 'attachments', 'property'])->paginate(15)->withQueryString();
+        $categories = Category::with('property')->get();
+        $departments = Department::with('property')->get();
 
         return view('assets.index', ['assets' => $assets, 'categories' => $categories, 'departments' => $departments]);
     }
@@ -79,8 +79,8 @@ class AssetController extends Controller
         $this->authorize('create', Asset::class);
 
         return view('assets.create', [
-            'categories' => Category::all(),
-            'departments' => Department::all(),
+            'categories'   => Category::with('property')->get(),
+            'departments'  => Department::with('property')->get(),
             'existingTags' => Asset::select('tag')->distinct()->orderBy('tag')->get(),
         ]);
     }
@@ -131,6 +131,9 @@ class AssetController extends Controller
 
         $data['purchase_date'] = $purchaseDate;
         $data['warranty_date'] = $warrantyDate;
+
+        // Remove fields not in $fillable — handled separately
+        unset($data['attachment'], $data['warranty_duration']);
 
         // property_id is auto-assigned by BelongsToProperty trait
         $asset = Asset::create($data);
@@ -192,10 +195,13 @@ class AssetController extends Controller
     {
         $this->authorize('update', $asset);
 
+        // Eager-load asset relations used in the view
+        $asset->loadMissing(['attachments', 'department']);
+
         return view('assets.edit', [
-            'asset' => $asset,
-            'categories' => Category::all(),
-            'departments' => Department::all(),
+            'asset'        => $asset,
+            'categories'   => Category::with('property')->get(),
+            'departments'  => Department::with('property')->get(),
             'existingTags' => Asset::select('tag')->distinct()->orderBy('tag')->get(),
         ]);
     }
@@ -251,6 +257,9 @@ class AssetController extends Controller
             $data['purchase_date'] = $purchaseDate;
             $data['warranty_date'] = $warrantyDate;
         }
+
+        // Remove fields not in $fillable — handled separately
+        unset($data['attachment'], $data['warranty_duration']);
 
         $asset->update($data);
 
@@ -336,7 +345,7 @@ class AssetController extends Controller
 
         // Pembatasan akses ke departemen lain (non-admin, non-super-admin)
         if (! Auth::user()->isSuperAdmin() && ! Auth::user()->isRole('admin') && ! Auth::user()->hasExecutiveOversight()) {
-            $appliedFilters['department_scope'] = Auth::user()->department->name;
+            $appliedFilters['department_scope'] = Auth::user()->loadMissing('department')->department->name;
             $query->where('department_id', Auth::user()->department_id);
         }
 
@@ -361,8 +370,8 @@ class AssetController extends Controller
             $query->latest();
         }
 
-        $assetsToExport = $query->get();
-        $property = Auth::user()->isSuperAdmin() && session('active_property_id') ? \App\Models\Property::find(session('active_property_id'))?->name ?? 'All Properties' : (Auth::user()->isSuperAdmin() ? 'All Properties' : Auth::user()->property->name);
+        $assetsToExport = $query->with(['category', 'department'])->get();
+        $property = Auth::user()->isSuperAdmin() && session('active_property_id') ? \App\Models\Property::find(session('active_property_id'))?->name ?? 'All Properties' : (Auth::user()->isSuperAdmin() ? 'All Properties' : Auth::user()->loadMissing('property')->property->name);
 
         if ($request->input('format') === 'pdf') {
             $pdf = \Barryvdh\DomPDF\Facade\Pdf::loadView('assets.pdf', [

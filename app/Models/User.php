@@ -67,6 +67,9 @@ class User extends Authenticatable
 
     public function isRole(string $name): bool
     {
+        if (! $this->relationLoaded('role')) {
+            $this->load('role');
+        }
         return optional($this->role)->name === $name;
     }
 
@@ -111,6 +114,9 @@ class User extends Authenticatable
             return true;
         }
 
+        if (! $this->relationLoaded('role')) {
+            $this->load('role');
+        }
         $perm = $this->role->{$module} ?? 'no access';
 
         if ($perm === 'full access') {
@@ -147,6 +153,9 @@ class User extends Authenticatable
     {
         if ($this->isSuperAdmin()) {
             return true;
+        }
+        if (! $this->relationLoaded('department')) {
+            $this->load('department');
         }
         return optional($this->department)->is_executive_oversight == true;
     }

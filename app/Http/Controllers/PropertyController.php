@@ -118,6 +118,9 @@ class PropertyController extends Controller
 
         $data['code'] = strtoupper((string) $data['code']);
 
+        // Remove raw file fields — not in $fillable; paths were already stored above
+        unset($data['logo'], $data['background_image']);
+
         $property->update($data);
 
         return redirect()->route('properties.show', $property)->with('ok', 'Property Updated');

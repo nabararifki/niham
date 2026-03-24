@@ -47,11 +47,14 @@ class Asset extends Model
     protected static function booted()
     {
         static::deleting(function ($asset) {
-            if ($asset->isForceDeleting() && $attachment = $asset->attachments) {
-                if (\Storage::disk('public')->exists($attachment->path)) {
-                    \Storage::disk('public')->delete($attachment->path);
+            if ($asset->isForceDeleting()) {
+                $attachment = $asset->attachments()->first();
+                if ($attachment) {
+                    if (\Storage::disk('public')->exists($attachment->path)) {
+                        \Storage::disk('public')->delete($attachment->path);
+                    }
+                    $attachment->delete();
                 }
-                $attachment->delete();
             }
         });
     }

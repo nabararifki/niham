@@ -24,14 +24,23 @@ class UserFactory extends Factory
     public function definition(): array
     {
         return [
-            'name' => fake()->name(),
-            'username' => fake()->unique()->userName(),
-            'role_id' => \App\Models\Role::factory(),
-            'department_id' => \App\Models\Department::factory(),
-            'email' => fake()->unique()->safeEmail(),
-            'email_verified_at' => now(),
-            'password' => static::$password ??= Hash::make('password'),
-            'remember_token' => Str::random(10),
+            'name'                  => fake()->name(),
+            'username'              => fake()->unique()->userName(),
+            'role_id'               => \App\Models\Role::factory(),
+            'department_id'         => \App\Models\Department::factory(),
+            'property_id'           => null,
+            'email'                 => fake()->unique()->safeEmail(),
+            'email_verified_at'     => now(),
+            'password'              => static::$password ??= Hash::make('password'),
+            'remember_token'        => Str::random(10),
+            // Explicitly set DB-defaulted columns so the in-memory model instance
+            // has them in $attributes. shouldBeStrict() throws MissingAttributeException
+            // for any attribute accessed that was not present in $attributes at creation.
+            'is_super_admin'        => false,
+            'notify_department'     => true,
+            'notify_all_properties' => false,
+            'notify_email'          => false,
+            'email_frequency'       => 'immediate',
         ];
     }
 

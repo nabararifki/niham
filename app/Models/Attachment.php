@@ -10,9 +10,11 @@ class Attachment extends Model
     use HasFactory;
 
     protected $fillable = [
+        'uuid',
         'asset_id',
         'path',
         'type',
+        'original_name',
     ];
 
     public function asset()

@@ -22,6 +22,7 @@
                         />
                         <x-input-error :messages="$errors->get('name')" class="mt-2" />
                     </div>
+                    @php
                         $options = [
                             'no access' => 'messages.no_access', 
                             'view only' => 'messages.view_only', 

@@ -66,7 +66,7 @@ class UserController extends Controller
             }
         }
         $departments = $departmentsQuery->get();
-        $roles = Role::all();
+        $roles = Role::with('property')->get();
         $properties = Auth::user()->isSuperAdmin() ? Property::all() : collect();
 
         return view('users.index', ['users' => $users, 'roles' => $roles, 'departments' => $departments, 'properties' => $properties]);
@@ -79,7 +79,7 @@ class UserController extends Controller
     {
         $this->authorize('create', User::class);
 
-        $departmentsQuery = Department::query();
+        $departmentsQuery = Department::query()->with('property');
         if (! Auth::user()->isSuperAdmin()) {
             $departmentsQuery->where('property_id', Auth::user()->property_id);
             if (! Auth::user()->isRole('admin') && ! Auth::user()->hasExecutiveOversight()) {
@@ -88,15 +88,15 @@ class UserController extends Controller
         }
         $departments = $departmentsQuery->get();
 
-        $rolesQuery = Role::query();
+        $rolesQuery = Role::query()->with('property');
         if (! Auth::user()->isSuperAdmin() && ! Auth::user()->isRole('admin')) {
             $rolesQuery->where('name', '!=', 'admin');
         }
 
         return view('users.create', [
-            'roles' => $rolesQuery->get(),
+            'roles'       => $rolesQuery->get(),
             'departments' => $departments,
-            'properties' => Auth::user()->isSuperAdmin() ? Property::all() : collect(),
+            'properties'  => Auth::user()->isSuperAdmin() ? Property::all() : collect(),
         ]);
     }
 
@@ -188,11 +188,17 @@ class UserController extends Controller
                 $departmentsQuery->where('id', Auth::user()->department_id);
             }
         }
+        if (Auth::user()->isSuperAdmin()) {
+            $departmentsQuery->with('property');
+        }
         $departments = $departmentsQuery->get();
 
         $rolesQuery = Role::query();
         if (! Auth::user()->isSuperAdmin() && ! Auth::user()->isRole('admin')) {
             $rolesQuery->where('name', '!=', 'admin');
+        }
+        if (Auth::user()->isSuperAdmin()) {
+            $rolesQuery->with('property');
         }
 
         return view('users.edit', [

@@ -19,7 +19,19 @@ class QrController extends Controller
 
         $signedUrl = \Illuminate\Support\Facades\URL::signedRoute('qr.resolve', ['uuid' => $asset->uuid]);
 
-        // Generate raw Base QR (using simple-qrcode but yielding string format)
+        // SVG fallback: simple-qrcode's PNG backend REQUIRES imagick; there is no GD
+        // fallback in BaconQrCode. On servers without imagick, use the pure-PHP SVG backend.
+        if (! extension_loaded('imagick')) {
+            $qrSvg = \SimpleSoftwareIO\QrCode\Facades\QrCode::format('svg')
+                ->size(360)
+                ->margin(1)
+                ->errorCorrection('H')
+                ->generate($signedUrl);
+
+            return response((string) $qrSvg)->header('Content-Type', 'image/svg+xml');
+        }
+
+        // Generate raw PNG QR (imagick available path)
         $qrRaw = \SimpleSoftwareIO\QrCode\Facades\QrCode::format('png')
             ->size(360)
             ->margin(1)

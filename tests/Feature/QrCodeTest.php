@@ -27,6 +27,12 @@ class QrCodeTest extends TestCase
         $response = $this->get(route('assets.qr', $asset));
 
         $response->assertStatus(200);
-        $response->assertHeader('Content-Type', 'image/png');
+        // Content-Type is image/png when imagick is available, image/svg+xml otherwise.
+        // Assert the response is a valid image type without pinning to a specific renderer.
+        $this->assertStringStartsWith(
+            'image/',
+            $response->headers->get('Content-Type'),
+            'QR response must be an image (png or svg depending on server extensions).'
+        );
     }
 }

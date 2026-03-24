@@ -25,10 +25,10 @@ class DashboardController extends Controller
                 ->selectRaw('count(assets.id) as count, departments.name')
                 ->groupBy('departments.name')
                 ->pluck('count', 'name'),
-            'recentAssets' => (clone $assetQuery)->with('department')->orderByDesc('updated_at')->take(5)->get(),
+            'recentAssets' => (clone $assetQuery)->with(['department', 'editorUser'])->orderByDesc('updated_at')->take(5)->get(),
             'activeProperty' => auth()->user()->isSuperAdmin()
                                     ? (session('active_property_id') ? Property::find(session('active_property_id')) : null)
-                                    : auth()->user()->property,
+                                    : auth()->user()->loadMissing('property')->property,
         ]);
     }
 }

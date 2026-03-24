@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.2] - 2026-03-24
+### Added
+- **Performance Indexes**: Added PostgreSQL GIN indexes for JSONB columns in `asset_histories` for optimized history lookups.
+- **Attachment Metadata**: Added `uuid` and `original_name` to `attachments` table for improved public routing and download handling.
+
+### Changed
+- **Query Optimization**: Implemented eager loading across all main controllers (`Asset`, `Category`, `Department`, `User`, `Profile`, `Property`) to eliminate N+1 query bottlenecks.
+- **Standardized UI/UX**: Overhauled navigation, notifications, and theme switching with unified Alpine.js logic and improved responsive design.
+- **Asset History Logic**: Standardized `AssetHistory` to use native JSON casting and removed manual UUID generation in favor of database-driven integrity.
+- **Controller Refinement**: Improved `AssetController` to handle non-fillable fields and better separation of concerns during storage/update.
+
+### Fixed
+- **QR Code Generation**: Standardized `QrCodeTest` to support both PNG and SVG outputs depending on server-side extensions.
+- **Backup/Restore Integrity**: Fixed data type handling for JSON columns in `BackupImportLogicTest`.
+
+
 ## [0.12.1] - 2026-03-10
 ### Added
 - **Standardized Release History**: Retroactively standardized all GitHub release notes (v0.1.0 - v0.12.0) derived from git history.

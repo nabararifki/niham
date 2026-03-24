@@ -57,11 +57,10 @@ class BackupImportLogicTest extends TestCase
         Storage::disk('public')->put('attachments/macbook.pdf', 'fake PDF content');
 
         AssetHistory::create([
-            'uuid' => (string) \Illuminate\Support\Str::uuid(),
             'asset_id' => $assetA->id,
-            'action' => 'created',
-            'original' => json_encode(['status' => null]),
-            'changes' => json_encode(['status' => 'active']),
+            'action'   => 'created',
+            'original' => ['status' => null],
+            'changes'  => ['status' => 'active'],
         ]);
 
         $backupService = new TenantBackupService($this->propertyA);

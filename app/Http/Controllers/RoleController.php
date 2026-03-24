@@ -20,7 +20,7 @@ class RoleController extends Controller
     {
         $this->authorize('view', Role::class);
         
-        $query = Role::with(['users']);
+        $query = Role::with(['users', 'property']);
         
         if (! Auth::user()->isSuperAdmin() && ! Auth::user()->isRole('admin')) {
             $query->where('name', '!=', 'admin');

@@ -8,6 +8,8 @@ use Illuminate\Support\Facades\Auth;
 use App\Models\Property;
 use App\Models\Asset;
 use App\Observers\AssetObserver;
+use Illuminate\Database\Eloquent\Model;
+
 
 class AppServiceProvider extends ServiceProvider
 {
@@ -24,7 +26,10 @@ class AppServiceProvider extends ServiceProvider
      */
     public function boot(): void
     {
+        Model::shouldBeStrict(! $this->app->isProduction());
+
         Asset::observe(AssetObserver::class);
+
 
         View::composer('*', function ($view) {
             $activeProperty = null;
@@ -37,6 +42,12 @@ class AppServiceProvider extends ServiceProvider
                         $activeProperty = Property::find($activeId);
                     }
                 } else {
+                    // Explicit eager-load required: shouldBeStrict() throws
+                    // LazyLoadingViolationException on bare $user->property access
+                    // when the relation was not already loaded by Auth::user().
+                    if (! $user->relationLoaded('property')) {
+                        $user->load('property');
+                    }
                     $activeProperty = $user->property;
                 }
             }
