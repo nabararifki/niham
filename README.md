@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/Bara-BSI/niham/main/public/niham-logo.png" alt="NIHAM Logo" width="150" height="auto" />
+  <img src="https://raw.githubusercontent.com/nabararifki/niham/main/public/niham-logo.png" alt="NIHAM Logo" width="150" height="auto" />
 </p>
 
 # 🏨 NIHAM (New Integrated Hotel Asset Management)
@@ -41,7 +41,7 @@ Follow these steps to set up the project on a native openSUSE system.
 
 1.  **Clone the project**
     ```bash
-    git clone https://github.com/Bara-BSI/niham.git
+    git clone https://github.com/nabararifki/niham.git
     cd niham
     ```
 
