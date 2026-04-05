@@ -16,6 +16,7 @@
 
 ## ✨ Main Features
 
+- **Location Management:** Track and organize assets by specific physical locations within your hotel property.
 - **Smart Scanning:** Upload an image of an asset's data plate, and let the AI automatically fill in the details like Serial Numbers and Brands.
 - **Easy Tracking:** Monitor where your assets are, their current condition, and when their warranty expires.
 - **QR Codes:** Every asset gets its own QR code. Scan it with a phone to instantly see the asset details.

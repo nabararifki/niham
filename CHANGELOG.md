@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.0] - 2026-04-05
+### Added
+- **Location Feature**: Implemented a comprehensive Location module to track assets by physical spaces.
+- **RBAC Integration**: Integrated the new Location module into the existing Role-Based Access Control (RBAC) ecosystem, ensuring strict parity with existing permissions.
+
+### Changed
+- **UI Optimizations**: Refactored the Role Index and Detail views with a Grouped Badge System for high-density tables and improved permission visibility.
+
 ## [0.12.2] - 2026-03-24
 ### Added
 - **Performance Indexes**: Added PostgreSQL GIN indexes for JSONB columns in `asset_histories` for optimized history lookups.
