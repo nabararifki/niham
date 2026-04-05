@@ -6,6 +6,7 @@ use App\Exports\AssetsExport;
 use App\Models\Asset;
 use App\Models\Category;
 use App\Models\Department;
+use App\Models\Location;
 use Auth;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
@@ -64,7 +65,7 @@ class AssetController extends Controller
             $query->latest();
         }
 
-        $assets = $query->with(['category', 'department', 'attachments', 'property'])->paginate(15)->withQueryString();
+        $assets = $query->with(['category', 'department', 'location', 'attachments', 'property'])->paginate(15)->withQueryString();
         $categories = Category::with('property')->get();
         $departments = Department::with('property')->get();
 
@@ -81,6 +82,7 @@ class AssetController extends Controller
         return view('assets.create', [
             'categories'   => Category::with('property')->get(),
             'departments'  => Department::with('property')->get(),
+            'locations'    => Location::with('property')->orderBy('name')->get(),
             'existingTags' => Asset::select('tag')->distinct()->orderBy('tag')->get(),
         ]);
     }
@@ -96,6 +98,7 @@ class AssetController extends Controller
             'name' => 'required|string|max:255',
             'category_id' => 'required|exists:categories,id',
             'department_id' => 'required|exists:departments,id',
+            'location_id' => 'nullable|exists:locations,id',
             'status' => 'in:in_service,out_of_service,disposed',
             'serial_number' => 'nullable|string|max:255',
             'purchase_date' => 'nullable|date',
@@ -176,6 +179,7 @@ class AssetController extends Controller
         $asset->load([
             'category',
             'department',
+            'location',
             'attachments',
         ]);
         $assetClass = Asset::class;
@@ -202,6 +206,7 @@ class AssetController extends Controller
             'asset'        => $asset,
             'categories'   => Category::with('property')->get(),
             'departments'  => Department::with('property')->get(),
+            'locations'    => Location::with('property')->orderBy('name')->get(),
             'existingTags' => Asset::select('tag')->distinct()->orderBy('tag')->get(),
         ]);
     }
@@ -217,6 +222,7 @@ class AssetController extends Controller
             'name' => 'required|string|max:255',
             'category_id' => 'required|exists:categories,id',
             'department_id' => 'nullable|exists:departments,id',
+            'location_id' => 'nullable|exists:locations,id',
             'status' => 'in:in_service,out_of_service,disposed',
             'serial_number' => 'nullable|string|max:255',
             'purchase_date' => 'nullable|date',
@@ -370,7 +376,7 @@ class AssetController extends Controller
             $query->latest();
         }
 
-        $assetsToExport = $query->with(['category', 'department'])->get();
+        $assetsToExport = $query->with(['category', 'department', 'location'])->get();
         $property = Auth::user()->isSuperAdmin() && session('active_property_id') ? \App\Models\Property::find(session('active_property_id'))?->name ?? 'All Properties' : (Auth::user()->isSuperAdmin() ? 'All Properties' : Auth::user()->loadMissing('property')->property->name);
 
         if ($request->input('format') === 'pdf') {

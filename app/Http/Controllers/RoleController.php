@@ -53,6 +53,7 @@ class RoleController extends Controller
             'perm_users' => 'nullable|string',
             'perm_categories' => 'nullable|string',
             'perm_departments' => 'nullable|string',
+            'perm_locations' => 'nullable|string',
             'perm_roles' => 'nullable|string',
         ]);
 
@@ -62,6 +63,7 @@ class RoleController extends Controller
             'perm_users' => 'no access',
             'perm_categories' => 'no access',
             'perm_departments' => 'no access',
+            'perm_locations' => 'no access',
             'perm_roles' => 'no access',
         ], array_filter($data));
 
@@ -85,7 +87,7 @@ class RoleController extends Controller
         }
 
         // Paginate related models separately
-        $users = $role->users()->paginate(5, ['*'], 'users_page');
+        $users = $role->users()->with('department')->paginate(5, ['*'], 'users_page');
 
         return view('roles.show', ['role' => $role, 'users' => $users]);
     }
@@ -123,6 +125,7 @@ class RoleController extends Controller
             'perm_users' => 'nullable|string',
             'perm_categories' => 'nullable|string',
             'perm_departments' => 'nullable|string',
+            'perm_locations' => 'nullable|string',
             'perm_roles' => 'nullable|string',
         ]);
 
@@ -132,6 +135,7 @@ class RoleController extends Controller
             'perm_users' => 'no access',
             'perm_categories' => 'no access',
             'perm_departments' => 'no access',
+            'perm_locations' => 'no access',
             'perm_roles' => 'no access',
         ], array_filter($data));
 

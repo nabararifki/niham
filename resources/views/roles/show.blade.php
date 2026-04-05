@@ -20,14 +20,48 @@
                     <!-- Permissions -->
                     <div class="space-y-3 pt-4 md:pt-0 border-t md:border-none border-gray-200/50">
                         <h3 class="text-lg font-bold text-gray-900 dark:text-gray-100 border-b border-gray-200/50 pb-2">{{ __('messages.role_permissions') }}</h3>
-                        <div class="bg-gray-50/80 dark:bg-gray-700/50 p-4 rounded-lg border border-gray-200/40 dark:border-gray-600 shadow-sm">
-                            <ul class="list-disc pl-5 mt-2 text-gray-700 dark:text-gray-300">
-                                <li><strong>{{ __('messages.assets') }}:</strong> {{ ucwords(__('messages.' . str_replace([' & ', ' '], ['_', '_'], $role->perm_assets ?? 'no_access'))) }}</li>
-                                <li><strong>{{ __('messages.users') }}:</strong> {{ ucwords(__('messages.' . str_replace([' & ', ' '], ['_', '_'], $role->perm_users ?? 'no_access'))) }}</li>
-                                <li><strong>{{ __('messages.categories') }}:</strong> {{ ucwords(__('messages.' . str_replace([' & ', ' '], ['_', '_'], $role->perm_categories ?? 'no_access'))) }}</li>
-                                <li><strong>{{ __('messages.departments') }}:</strong> {{ ucwords(__('messages.' . str_replace([' & ', ' '], ['_', '_'], $role->perm_departments ?? 'no_access'))) }}</li>
-                                <li><strong>{{ __('messages.roles') }}:</strong> {{ ucwords(__('messages.' . str_replace([' & ', ' '], ['_', '_'], $role->perm_roles ?? 'no_access'))) }}</li>
-                            </ul>
+                        <div class="bg-gray-50/80 dark:bg-gray-700/50 rounded-lg border border-gray-200/40 dark:border-gray-600 shadow-sm overflow-x-auto">
+                            <table class="min-w-full text-sm text-left">
+                                <thead class="bg-gray-100/50 dark:bg-gray-800/50 text-gray-600 dark:text-gray-300 font-semibold border-b border-gray-200/50 dark:border-gray-600">
+                                    <tr>
+                                        <th class="py-2 px-3">{{ __('messages.module') ?? 'Module' }}</th>
+                                        <th class="py-2 px-3 text-center">{{ __('messages.view') ?? 'View' }}</th>
+                                        <th class="py-2 px-3 text-center">{{ __('messages.create') ?? 'Create' }}</th>
+                                        <th class="py-2 px-3 text-center">{{ __('messages.update') ?? 'Update' }}</th>
+                                        <th class="py-2 px-3 text-center">{{ __('messages.delete') ?? 'Delete' }}</th>
+                                    </tr>
+                                </thead>
+                                <tbody class="divide-y divide-gray-200/50 dark:divide-gray-600/50">
+                                    @php
+                                        $modules = [
+                                            'assets' => $role->perm_assets,
+                                            'users' => $role->perm_users,
+                                            'categories' => $role->perm_categories,
+                                            'departments' => $role->perm_departments,
+                                            'locations' => $role->perm_locations,
+                                            'roles' => $role->perm_roles,
+                                        ];
+                                        $check = '<svg class="w-5 h-5 text-green-500 mx-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg>';
+                                        $cross = '<svg class="w-5 h-5 text-red-500 mx-auto opacity-40" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>';
+                                    @endphp
+                                    @foreach($modules as $key => $permStr)
+                                        @php
+                                            $p = $permStr ?? 'no access';
+                                            $canView = $p !== 'no access';
+                                            $canCreate = $p === 'full access' || str_contains($p, 'create');
+                                            $canUpdate = $p === 'full access' || str_contains($p, 'update');
+                                            $canDelete = $p === 'full access' || str_contains($p, 'delete');
+                                        @endphp
+                                        <tr class="hover:bg-white dark:hover:bg-gray-800 transition">
+                                            <td class="py-2 px-3 font-medium text-gray-900 dark:text-gray-100 capitalize">{{ __('messages.' . $key) }}</td>
+                                            <td class="py-2 px-3 text-center">{!! $canView ? $check : $cross !!}</td>
+                                            <td class="py-2 px-3 text-center">{!! $canCreate ? $check : $cross !!}</td>
+                                            <td class="py-2 px-3 text-center">{!! $canUpdate ? $check : $cross !!}</td>
+                                            <td class="py-2 px-3 text-center">{!! $canDelete ? $check : $cross !!}</td>
+                                        </tr>
+                                    @endforeach
+                                </tbody>
+                            </table>
                         </div>
                     </div>
                 </div>

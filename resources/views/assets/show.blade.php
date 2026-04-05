@@ -40,6 +40,7 @@
                                 <div><strong class="text-gray-900 dark:text-gray-100">{{ __('messages.name') }}</strong> <span class="text-gray-700 dark:text-gray-300">{{ $asset->name }}</span></div>
                                 <div><strong class="text-gray-900 dark:text-gray-100">{{ __('messages.category') }}</strong> <span class="text-gray-700 dark:text-gray-300">{{ $asset->category->name ?? '-' }}</span></div>
                                 <div><strong class="text-gray-900 dark:text-gray-100">{{ __('messages.department') }}</strong> <span class="text-gray-700 dark:text-gray-300">{{ $asset->department->name ?? '-' }}</span></div>
+                                <div><strong class="text-gray-900 dark:text-gray-100">{{ __('messages.locations') ?? 'Location' }}</strong> <span class="text-gray-700 dark:text-gray-300">{{ $asset->location?->name ?? '-' }}</span></div>
                                 <div class="flex items-center gap-2">
                                     <strong class="text-gray-900 dark:text-gray-100">{{ __('messages.status') }}</strong> 
                                     <span class="text-gray-700 dark:text-gray-300">{{ ucfirst(str_replace('_', ' ', $asset->status)) }}</span>

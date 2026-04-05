@@ -137,6 +137,16 @@ return [
     'add_new_department' => 'Add New Department',
     'add_new_role' => 'Add New Role',
     'add_new_property' => 'Add New Property',
+    'locations' => 'Locations',
+    'new_location' => 'New Location',
+    'add_new_location' => 'Add New Location',
+    'edit_location' => 'Edit Location',
+    'location_name' => 'Location Name',
+    'location_code' => 'Location Code',
+    'location_details' => 'Location Details',
+    'back_to_locations' => 'Back to Locations',
+    'delete_location' => 'Delete Location',
+    'delete_location_confirm' => 'Are you sure you want to delete this location? This action cannot be undone.',
 
     // --- Auto-Injected Raw Strings ---
     '1 Year' => '1 Year',
@@ -503,4 +513,5 @@ return [
     'restore_error_json' => 'The backup file contains malformed JSON:',
     'restore_error_generic' => 'An unexpected error occurred during restore. The database has been rolled back.',
     'asset_deleted' => 'Asset deleted successfully.',
+    'permissions_assigned' => 'Permissions Assigned',
 ];

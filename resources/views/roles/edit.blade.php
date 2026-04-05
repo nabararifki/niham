@@ -36,7 +36,7 @@
                             'update & delete' => 'messages.update_delete', 
                             'full access' => 'messages.full_access'
                         ];
-                        $perms = ['perm_assets' => 'messages.assets', 'perm_users' => 'messages.users', 'perm_categories' => 'messages.categories', 'perm_departments' => 'messages.departments', 'perm_roles' => 'messages.roles'];
+                        $perms = ['perm_assets' => 'messages.assets', 'perm_users' => 'messages.users', 'perm_categories' => 'messages.categories', 'perm_departments' => 'messages.departments', 'perm_locations' => 'messages.locations', 'perm_roles' => 'messages.roles'];
                     @endphp
                     <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
                         @foreach($perms as $field => $label)

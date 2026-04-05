@@ -4,13 +4,12 @@
             <div class="bg-white/90 dark:bg-gray-800/90 backdrop-blur-md rounded-xl border border-gray-200/50 dark:border-gray-700/50 shadow-sm">
                 <div class="px-6 py-4 border-b border-gray-200/50 dark:border-gray-700/50">
                     <h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200">
-                        {{ __('messages.edit_department') ?? __('messages.edit_department') }}
+                        {{ __('messages.add_new_location') ?? 'Add New Location' }}
                     </h2>
                 </div>
                 <div class="p-6">
-                <form method="POST" action="{{ route('departments.update', $department) }}" enctype="multipart/form-data">
+                <form method="POST" action="{{ route('locations.store') }}" enctype="multipart/form-data">
                     @csrf
-                    @method('PUT')
 
                     <!-- Responsive Two-Column Layout -->
                     <div class="m-8 grid grid-cols-5 gap-1 justify-evenly">
@@ -19,14 +18,14 @@
                         <div class="col-span-5 md:col-span-4">
                             <!-- Name -->
                             <div>
-                                <x-input-label for="name" :value="__('messages.department_name')" />
+                                <x-input-label for="name" :value="__('messages.location_name') ?? 'Location Name'" />
                                 <x-text-input
                                     id="name"
                                     name="name"
                                     type="text"
                                     class="mt-1 block w-full"
                                     required
-                                    value="{{ old('name', $department->name ??'') }}"
+                                    value="{{ old('name') }}"
                                 />
                                 <x-input-error :messages="$errors->get('name')" class="mt-2" />
                             </div>
@@ -37,31 +36,25 @@
 
                             <!-- Code -->
                             <div>
-                                <x-input-label for="code" :value="__('messages.department_code')" />
+                                <x-input-label for="code" :value="__('messages.location_code') ?? 'Code'" />
                                 <x-text-input
                                     id="code"
                                     name="code"
                                     type="text"
                                     class="mt-1 block w-full"
-                                    value="{{ old('code',$department->code ??'') }}"
+                                    value="{{ old('code') }}"
                                 />
                                 <x-input-error :messages="$errors->get('code')" class="mt-2" />
-                            </div>
-                            <!-- Oversight -->
-                            <div class="mt-4">
-                                <label class="flex items-center">
-                                    <input type="checkbox" name="is_executive_oversight" value="1" {{ old('is_executive_oversight', $department->is_executive_oversight) ? 'checked' : '' }} class="h-4 w-4 text-accent border-gray-300 dark:border-gray-700 dark:bg-gray-900/50 rounded focus:ring-accent">
-                                    <span class="ml-2 text-sm text-gray-600 dark:text-gray-300">{{ __('messages.executive_oversight') }}</span>
-                                </label>
                             </div>
                         </div>
                     </div>
 
                     {{-- Notes --}}
-                            <div
-                                x-data="{ count: {{ strlen(old('notes', $department->notes ?? '')) }} }"
+                            <div 
+                                x-data="{ count: {{ strlen(old('notes', '')) }} }"
                                 class="m-8"
-                            >                                <x-input-label for="notes" :value="__('messages.notes')" />
+                            >
+                                <x-input-label for="notes" :value="__('messages.notes') ?? 'Notes'" />
 
                                 <textarea
                                     id="notes"
@@ -69,12 +62,12 @@
                                     maxlength="200"
                                     rows="3"
                                     class="mt-1 block w-full border-gray-300 dark:border-gray-700 dark:bg-gray-900/50 dark:text-gray-100 rounded-md shadow-sm"
-                                    placeholder="{{ __('messages.add_note_placeholder') }}"
+                                    placeholder="{{ __('messages.add_note_placeholder') ?? 'Add note...' }}"
                                     x-on:input="count = $event.target.value.length"
-                                >{{ old('notes', $department->notes) }}</textarea>
+                                ></textarea>
 
                                 <div class="flex justify-between mt-1 text-sm text-gray-500 dark:text-gray-400">
-                                    <span>{{ __('messages.max_200_chars') }}</span>
+                                    <span>{{ __('messages.max_200_chars') ?? 'Max 200 characters' }}</span>
                                     <span x-text="count + '/200'"></span>
                                 </div>
 
@@ -86,7 +79,7 @@
                         <div class="mt-6 flex justify-start">
                             <x-secondary-button onclick="window.history.back()">
                                 <x-heroicon-s-arrow-left class="w-4 h-4 mr-2" />
-                                {{ __('messages.back') }}
+                                {{ __('messages.back') ?? 'Back' }}
                             </x-secondary-button>
 
                         </div>
@@ -94,7 +87,7 @@
                         <div class="mt-6 flex justify-end">
                             <x-primary-button>
                                 <x-heroicon-s-bookmark class="w-4 h-4 mr-2" />
-                                {{ __('messages.save') }}
+                                {{ __('messages.save') ?? 'Save' }}
                             </x-primary-button>
                         </div>
                     </div>

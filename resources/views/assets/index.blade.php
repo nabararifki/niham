@@ -145,6 +145,7 @@
                             <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-200 uppercase tracking-wider">{{ __('messages.name') }}</th>
                             <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-200 uppercase tracking-wider">{{ __('messages.category') }}</th>
                             <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-200 uppercase tracking-wider">{{ __('messages.department') }}</th>
+                            <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-200 uppercase tracking-wider">{{ __('messages.locations') ?? 'Location' }}</th>
                             <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-200 uppercase tracking-wider">{{ __('messages.status') }}</th>
                             @if(Auth::user()->isSuperAdmin())
                                 <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-200 uppercase tracking-wider">{{ __('messages.property') }}</th>
@@ -164,6 +165,7 @@
                                 </td>
                                 <td class="px-4 py-2 text-sm text-gray-700 dark:text-gray-200">{{ $a->category->name }}</td>
                                 <td class="px-4 py-2 text-sm text-gray-700 dark:text-gray-200">{{ optional($a->department)->name ?? '-' }}</td>
+                                <td class="px-4 py-2 text-sm text-gray-700 dark:text-gray-200">{{ optional($a->location)->name ?? '-' }}</td>
                                 <td class="px-4 py-2 text-sm">
                                     <span class="inline-flex px-2 py-1 text-xs font-semibold rounded-full 
                                         @if ($a->status == 'in_service')
@@ -193,7 +195,7 @@
                             </tr>
                         @empty
                             <tr>
-                                <td colspan="8" class="px-4 py-8 text-center text-gray-500 dark:text-gray-400">
+                                <td colspan="9" class="px-4 py-8 text-center text-gray-500 dark:text-gray-400">
                                     {{ __('messages.no_data_found') ?? 'No data found' }}
                                 </td>
                             </tr>

@@ -16,6 +16,7 @@ use App\Http\Controllers\RoleController;
 use App\Http\Controllers\UserController;
 use App\Http\Controllers\AssetImportController;
 use App\Http\Controllers\JobController;
+use App\Http\Controllers\LocationController;
 use Illuminate\Support\Facades\Route;
 
 // Redirect home to assets index
@@ -74,6 +75,7 @@ Route::middleware('auth')->group(function () {
         'assets' => AssetController::class,
         'roles' => RoleController::class,
         'departments' => DepartmentController::class,
+        'locations' => LocationController::class,
         'categories' => CategoryController::class,
         'users' => UserController::class,
         'properties' => PropertyController::class,

@@ -19,6 +19,7 @@ class Asset extends Model
         'name',
         'category_id',
         'department_id',
+        'location_id',
         'status',
         'serial_number',
         'purchase_date',
@@ -67,6 +68,11 @@ class Asset extends Model
     public function department()
     {
         return $this->belongsTo(Department::class);
+    }
+
+    public function location()
+    {
+        return $this->belongsTo(Location::class);
     }
 
     public function attachments()

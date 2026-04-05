@@ -7,24 +7,15 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 
-class Role extends Model
+class Location extends Model
 {
     use BelongsToProperty, HasFactory, HasUuids;
 
-    protected $fillable = [
-        'name',
-        'property_id',
-        'perm_assets',
-        'perm_users',
-        'perm_categories',
-        'perm_departments',
-        'perm_locations',
-        'perm_roles',
-    ];
+    protected $fillable = ['name', 'code', 'notes', 'property_id'];
 
-    public function users()
+    public function assets()
     {
-        return $this->hasMany(User::class);
+        return $this->hasMany(Asset::class);
     }
 
     public function uniqueIds(): array

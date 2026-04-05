@@ -62,7 +62,7 @@ class CategoryController extends Controller
     {
         $this->authorize('view', $category);
 
-        $assets = $category->assets()->paginate(5, ['*'], 'assets_page');
+        $assets = $category->assets()->with('category')->paginate(5, ['*'], 'assets_page');
 
         return view('categories.show', ['category' => $category, 'assets' => $assets]);
     }

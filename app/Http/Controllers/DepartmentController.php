@@ -65,8 +65,8 @@ class DepartmentController extends Controller
         $this->authorize('view', $department);
 
         // Paginate related models separately
-        $users = $department->users()->paginate(5, ['*'], 'users_page');
-        $assets = $department->assets()->paginate(5, ['*'], 'assets_page');
+        $users = $department->users()->with('role')->paginate(5, ['*'], 'users_page');
+        $assets = $department->assets()->with('category')->paginate(5, ['*'], 'assets_page');
 
         return view('departments.show', ['department' => $department, 'users' => $users, 'assets' => $assets]);
     }

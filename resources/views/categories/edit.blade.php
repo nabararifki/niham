@@ -51,11 +51,10 @@
                     </div>
 
                     {{-- Notes --}}
-                        <div 
-                            x-data="{ count: {{ strlen(old('notes', $asset->notes ?? '')) }} }"
+                        <div
+                            x-data="{ count: {{ strlen(old('notes', $category->notes ?? '')) }} }"
                             class="m-8"
-                        >
-                            <x-input-label for="notes" :value="__('messages.notes')" />
+                        >                            <x-input-label for="notes" :value="__('messages.notes')" />
 
                             <textarea
                                 id="notes"

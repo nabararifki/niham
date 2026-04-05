@@ -159,21 +159,41 @@ class TenantRestoreService
     private function restoreRoles(): void
     {
         $now = now()->toDateTimeString();
-        $rows = array_map(function (array $r) use ($now): array {
-            return array_merge($r, [
-                'property_id' => $this->property->id,
-                'created_at' => $this->toMySqlDatetime($r['created_at'] ?? $now),
-                'updated_at' => $now,
-            ]);
-        }, $this->data['roles'] ?? []);
+        
+        foreach ($this->data['roles'] ?? [] as $r) {
+            $r['property_id'] = $this->property->id;
+            $r['created_at'] = $this->toMySqlDatetime($r['created_at'] ?? $now);
+            $r['updated_at'] = $now;
 
-        if (! empty($rows)) {
-            DB::table('roles')->upsert(
-                $rows,
-                uniqueBy: ['uuid'],
-                update: ['name', 'perm_assets', 'perm_users', 'perm_categories',
-                    'perm_departments', 'perm_roles', 'property_id', 'updated_at'],
-            );
+            // Ensure name is a string to prevent query builder from converting to WHERE IN
+            // and to trigger PHP TypeError if it's an array (which tests expect for rollback validation)
+            if (is_array($r['name'] ?? null)) {
+                throw new \InvalidArgumentException('Role name cannot be an array');
+            }
+
+            $existing = DB::table('roles')->where('uuid', $r['uuid'])->first();
+            if (! $existing) {
+                $existing = DB::table('roles')
+                    ->where('property_id', $this->property->id)
+                    ->where('name', $r['name'])
+                    ->first();
+            }
+
+            if ($existing) {
+                DB::table('roles')->where('id', $existing->id)->update([
+                    'uuid' => $r['uuid'],
+                    'name' => $r['name'],
+                    'perm_assets' => $r['perm_assets'] ?? 'view only',
+                    'perm_users' => $r['perm_users'] ?? 'no access',
+                    'perm_categories' => $r['perm_categories'] ?? 'no access',
+                    'perm_departments' => $r['perm_departments'] ?? 'no access',
+                    'perm_roles' => $r['perm_roles'] ?? 'no access',
+                    'property_id' => $this->property->id,
+                    'updated_at' => $now,
+                ]);
+            } else {
+                DB::table('roles')->insert($r);
+            }
         }
     }
 
@@ -183,21 +203,37 @@ class TenantRestoreService
     private function restoreDepartments(): array
     {
         $now = now()->toDateTimeString();
-        $rows = array_map(function (array $d) use ($now): array {
-            return array_merge($d, [
-                'property_id' => $this->property->id,
-                'created_at' => $this->toMySqlDatetime($d['created_at'] ?? $now),
-                'updated_at' => $now,
-            ]);
-        }, $this->data['departments'] ?? []);
+        
+        foreach ($this->data['departments'] ?? [] as $d) {
+            $d['property_id'] = $this->property->id;
+            $d['created_at'] = $this->toMySqlDatetime($d['created_at'] ?? $now);
+            $d['updated_at'] = $now;
 
-        if (! empty($rows)) {
-            DB::table('departments')->upsert(
-                $rows,
-                uniqueBy: ['uuid'],
-                update: ['name', 'code', 'notes', 'is_executive_oversight',
-                    'property_id', 'updated_at'],
-            );
+            if (is_array($d['code'] ?? null)) {
+                throw new \InvalidArgumentException('Department code cannot be an array');
+            }
+
+            $existing = DB::table('departments')->where('uuid', $d['uuid'])->first();
+            if (! $existing) {
+                $existing = DB::table('departments')
+                    ->where('property_id', $this->property->id)
+                    ->where('code', $d['code'])
+                    ->first();
+            }
+
+            if ($existing) {
+                DB::table('departments')->where('id', $existing->id)->update([
+                    'uuid' => $d['uuid'],
+                    'name' => $d['name'],
+                    'code' => $d['code'],
+                    'notes' => $d['notes'] ?? null,
+                    'is_executive_oversight' => $d['is_executive_oversight'] ?? false,
+                    'property_id' => $this->property->id,
+                    'updated_at' => $now,
+                ]);
+            } else {
+                DB::table('departments')->insert($d);
+            }
         }
 
         return DB::table('departments')
@@ -212,20 +248,36 @@ class TenantRestoreService
     private function restoreCategories(): array
     {
         $now = now()->toDateTimeString();
-        $rows = array_map(function (array $c) use ($now): array {
-            return array_merge($c, [
-                'property_id' => $this->property->id,
-                'created_at' => $this->toMySqlDatetime($c['created_at'] ?? $now),
-                'updated_at' => $now,
-            ]);
-        }, $this->data['categories'] ?? []);
+        
+        foreach ($this->data['categories'] ?? [] as $c) {
+            $c['property_id'] = $this->property->id;
+            $c['created_at'] = $this->toMySqlDatetime($c['created_at'] ?? $now);
+            $c['updated_at'] = $now;
 
-        if (! empty($rows)) {
-            DB::table('categories')->upsert(
-                $rows,
-                uniqueBy: ['uuid'],
-                update: ['name', 'code', 'notes', 'property_id', 'updated_at'],
-            );
+            if (is_array($c['code'] ?? null)) {
+                throw new \InvalidArgumentException('Category code cannot be an array');
+            }
+
+            $existing = DB::table('categories')->where('uuid', $c['uuid'])->first();
+            if (! $existing) {
+                $existing = DB::table('categories')
+                    ->where('property_id', $this->property->id)
+                    ->where('code', $c['code'])
+                    ->first();
+            }
+
+            if ($existing) {
+                DB::table('categories')->where('id', $existing->id)->update([
+                    'uuid' => $c['uuid'],
+                    'name' => $c['name'],
+                    'code' => $c['code'],
+                    'notes' => $c['notes'] ?? null,
+                    'property_id' => $this->property->id,
+                    'updated_at' => $now,
+                ]);
+            } else {
+                DB::table('categories')->insert($c);
+            }
         }
 
         return DB::table('categories')

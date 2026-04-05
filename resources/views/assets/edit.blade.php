@@ -284,6 +284,25 @@
                                 </div>
                             @endif
 
+                            <!-- Location -->
+                            <div>
+                                <x-input-label for="location_id" :value="__('messages.locations')" />
+                                <select
+                                    id="location_id"
+                                    name="location_id"
+                                    class="mt-1 block w-full rounded-md border-gray-300 dark:border-gray-700 dark:bg-gray-900/50 dark:text-gray-100 shadow-sm focus:ring-accent focus:border-accent"
+                                >
+                                    <option value="">— {{ __('messages.none') }} —</option>
+                                    @foreach ($locations as $location)
+                                        <option value="{{ $location->id }}"
+                                            @selected(old('location_id', $asset->location_id) == $location->id)>
+                                            {{ $location->name }}{{ Auth::user()->isSuperAdmin() && $location->property ? ' - ' . $location->property->name : '' }}
+                                        </option>
+                                    @endforeach
+                                </select>
+                                <x-input-error :messages="$errors->get('location_id')" class="mt-2" />
+                            </div>
+
                             <!-- Status -->
                             <div>
                                 <x-input-label for="status" :value="__('messages.status')" />
