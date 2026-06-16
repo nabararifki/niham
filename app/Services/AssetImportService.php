@@ -32,6 +32,273 @@ class AssetImportService
     ];
 
     /**
+     * FASE 1: Buka file sementara, ambil sampel 15 baris, cari True Header,
+     * dan jalankan Hybrid Matching Pipeline.
+     *
+     * @param int $sheetIndex Zero-based index of the sheet to extract from (default: 0)
+     */
+    public function peek(string $filePath, string $extension, int $sheetIndex = 0): array
+    {
+        $options = $extension === 'csv' ? new CsvOptions() : new XlsxOptions();
+        $reader = $extension === 'csv' ? new CsvReader($options) : new XlsxReader($options);
+
+        $reader->open($filePath);
+
+        $sheets = [];
+        $firstSheetRows = [];
+        $rowCount = 0;
+        $currentSheetIndex = 0;
+
+        foreach ($reader->getSheetIterator() as $sheet) {
+            $sheets[] = $sheet->getName();
+            
+            // Extract max 15 rows from the target sheet
+            if ($currentSheetIndex === $sheetIndex && $rowCount === 0) {
+                foreach ($sheet->getRowIterator() as $row) {
+                    /** @var Row $row */
+                    $cells = array_map(function ($val) {
+                        if ($val instanceof \DateTimeInterface) return $val->format('Y-m-d');
+                        return is_string($val) ? trim($val) : (string) $val;
+                    }, $row->toArray());
+
+                    $firstSheetRows[] = $cells;
+                    $rowCount++;
+
+                    if ($rowCount >= 15) {
+                        break;
+                    }
+                }
+            }
+            $currentSheetIndex++;
+        }
+        $reader->close();
+
+        // 1. True Header Detection (Baris dengan cell non-empty terbanyak)
+        $trueHeaderIndex = 0;
+        $maxCells = -1;
+
+        foreach ($firstSheetRows as $idx => $row) {
+            $nonEmptyCount = count(array_filter($row, fn($cell) => trim($cell) !== ''));
+            if ($nonEmptyCount > $maxCells) {
+                $maxCells = $nonEmptyCount;
+                $trueHeaderIndex = $idx;
+            }
+        }
+
+        // Sanitize headers to remove nulls, empty strings, and whitespace-only column headers
+        $trueHeader = array_values(array_filter(
+            array_map('trim', $firstSheetRows[$trueHeaderIndex] ?? []),
+            fn($cell) => $cell !== '' && !is_null($cell)
+        ));
+
+        if (empty($trueHeader)) {
+            throw new Exception('No valid headers detected or file is empty.');
+        }
+
+        // 2. Ekstrak Preview Data (10 baris setelah True Header)
+        // Konversi dari indexed array ke associative array ber-key nama kolom
+        // agar Alpine getCombinedValue(row, fieldId) bisa melakukan row[colName].
+        $rawPreview = array_slice($firstSheetRows, $trueHeaderIndex + 1, 10);
+        $previewData = [];
+        foreach ($rawPreview as $row) {
+            $assocRow = [];
+            foreach ($trueHeader as $colIdx => $colName) {
+                $assocRow[$colName] = $row[$colIdx] ?? '';
+            }
+            $previewData[] = $assocRow;
+        }
+
+        // 3. Eksekusi Hybrid Matching Pipeline
+        // generateMappingProposals mengembalikan {numericIndex: fieldName|null}.
+        // Alpine mengharapkan {fieldName: columnName} — kita inversi di sini.
+        $rawProposals = $this->generateMappingProposals($trueHeader);
+        $mappingProposals = [];
+        foreach ($rawProposals as $colIndex => $fieldName) {
+            if ($fieldName === null || !isset($trueHeader[$colIndex])) {
+                continue;
+            }
+            // Normalisasi: category_id → category, department_id → department
+            // agar sesuai dengan key di Alpine mapping{} object.
+            $normalizedField = str_replace('_id', '', $fieldName);
+
+            // Jika field sudah dipetakan, jadikan array (multi-column merge)
+            if (isset($mappingProposals[$normalizedField])) {
+                if (!is_array($mappingProposals[$normalizedField])) {
+                    $mappingProposals[$normalizedField] = [$mappingProposals[$normalizedField]];
+                }
+                $mappingProposals[$normalizedField][] = $trueHeader[$colIndex];
+            } else {
+                $mappingProposals[$normalizedField] = $trueHeader[$colIndex];
+            }
+        }
+
+        return [
+            'sheets' => $sheets,
+            'true_header' => $trueHeader,
+            'preview_data' => $previewData,
+            'mapping_proposals' => $mappingProposals,
+        ];
+    }
+
+    /**
+     * Hybrid Matching Pipeline untuk mengusulkan kolom database.
+     */
+    private function generateMappingProposals(array $headerRow): array
+    {
+        $proposals = [];
+        $dictionary = [
+            'tag' => ['tag', 'kodeaset', 'assettag', 'kode', 'nomoraset', 'assetnumber'],
+            'name' => ['nama', 'name', 'namaaset', 'assetname', 'deskripsi', 'description', 'namabarang', 'itemname'],
+            'category_id' => ['kategori', 'category', 'jenis', 'type', 'tipe'],
+            'department_id' => ['departemen', 'department', 'dept', 'bagian', 'divisi', 'division', 'lokasi'],
+            'status' => ['status', 'kondisi', 'condition', 'state'],
+            'model' => ['model', 'tipe', 'type', 'merk', 'merek', 'brand', 'pabrikan', 'manufacturer'],
+            'serial_number' => ['serial', 'seri', 'serialnumber', 'noseri', 'nomorseri', 'sn', 'imei'],
+            'purchase_date' => ['tanggalbeli', 'purchasedate', 'tglbeli', 'date', 'tanggal', 'tahun', 'year'],
+            'purchase_cost' => ['harga', 'cost', 'price', 'biaya', 'purchasecost', 'nilai', 'hargabeli', 'nilaiaset'],
+            'remarks' => ['keterangan', 'catatan', 'remarks', 'note', 'notes', 'desc', 'description'],
+        ];
+
+        foreach ($headerRow as $colIndex => $colName) {
+            if (trim($colName) === '') {
+                $proposals[$colIndex] = null;
+                continue;
+            }
+
+            // Tahap 1: Exact Match (Direct canonical database fields intersection check)
+            $normalizedCol = strtolower(preg_replace('/[^a-zA-Z0-9_]/', '', $colName));
+            $matchedField = null;
+
+            $canonicalKeys = [
+                'tag' => 'tag',
+                'name' => 'name',
+                'category' => 'category_id',
+                'department' => 'department_id',
+                'status' => 'status',
+                'model' => 'model',
+                'serial_number' => 'serial_number',
+                'purchase_date' => 'purchase_date',
+                'purchase_cost' => 'purchase_cost',
+                'remarks' => 'remarks',
+            ];
+
+            if (isset($canonicalKeys[$normalizedCol])) {
+                $matchedField = $canonicalKeys[$normalizedCol];
+            }
+
+            // Tahap 2: Dictionary Config
+            if (!$matchedField) {
+                $dictNormalizedCol = str_replace('_', '', $normalizedCol);
+                foreach ($dictionary as $field => $aliases) {
+                    $cleanField = str_replace('_', '', $field);
+                    if ($dictNormalizedCol === $cleanField || in_array($dictNormalizedCol, array_map(fn($a) => str_replace('_', '', $a), $aliases), true)) {
+                        $matchedField = $field;
+                        break;
+                    }
+                }
+            }
+
+            // Tahap 3: Jaro-Winkler Distance
+            if (!$matchedField) {
+                $bestScore = 0;
+                $bestField = null;
+                $dictNormalizedCol = str_replace('_', '', $normalizedCol);
+
+                foreach ($dictionary as $field => $aliases) {
+                    $cleanField = str_replace('_', '', $field);
+                    $score = $this->jaroWinkler($dictNormalizedCol, $cleanField);
+                    if ($score > $bestScore) {
+                        $bestScore = $score;
+                        $bestField = $field;
+                    }
+
+                    foreach ($aliases as $alias) {
+                        $cleanAlias = str_replace('_', '', $alias);
+                        $aliasScore = $this->jaroWinkler($dictNormalizedCol, $cleanAlias);
+                        if ($aliasScore > $bestScore) {
+                            $bestScore = $aliasScore;
+                            $bestField = $field;
+                        }
+                    }
+                }
+
+                // Threshold > 0.85 untuk dianggap cocok
+                if ($bestScore > 0.85) {
+                    $matchedField = $bestField;
+                }
+            }
+
+            $proposals[$colIndex] = $matchedField;
+        }
+
+        return $proposals;
+    }
+
+    /**
+     * Native PHP implementation of Jaro-Winkler distance.
+     * Mengembalikan float 0.0 - 1.0
+     */
+    private function jaroWinkler(string $string1, string $string2): float
+    {
+        if ($string1 === $string2) return 1.0;
+
+        $len1 = strlen($string1);
+        $len2 = strlen($string2);
+        if ($len1 === 0 || $len2 === 0) return 0.0;
+
+        $matchDistance = (int) floor(max($len1, $len2) / 2) - 1;
+
+        $matches1 = array_fill(0, $len1, false);
+        $matches2 = array_fill(0, $len2, false);
+
+        $matches = 0;
+        for ($i = 0; $i < $len1; $i++) {
+            $start = max(0, $i - $matchDistance);
+            $end = min($i + $matchDistance + 1, $len2);
+
+            for ($j = $start; $j < $end; $j++) {
+                if (!$matches2[$j] && $string1[$i] === $string2[$j]) {
+                    $matches1[$i] = true;
+                    $matches2[$j] = true;
+                    $matches++;
+                    break;
+                }
+            }
+        }
+
+        if ($matches === 0) return 0.0;
+
+        $t = 0;
+        $point = 0;
+        for ($i = 0; $i < $len1; $i++) {
+            if ($matches1[$i]) {
+                while (!$matches2[$point]) {
+                    $point++;
+                }
+                if ($string1[$i] !== $string2[$point]) {
+                    $t++;
+                }
+                $point++;
+            }
+        }
+        $t /= 2;
+
+        $jaro = (($matches / $len1) + ($matches / $len2) + (($matches - $t) / $matches)) / 3.0;
+
+        $prefix = 0;
+        $maxPrefix = min(4, min($len1, $len2));
+        for ($i = 0; $i < $maxPrefix; $i++) {
+            if ($string1[$i] === $string2[$i]) {
+                $prefix++;
+            } else {
+                break;
+            }
+        }
+
+        return $jaro + ($prefix * 0.1 * (1.0 - $jaro));
+    }
+
+    /**
      * Parse an uploaded file using stream-based row-by-row reading.
      * Returns a flat array of mapped asset rows.
      *

@@ -56,10 +56,17 @@ Route::middleware('auth')->group(function () {
     // Smart Import Workflow
     Route::controller(AssetImportController::class)->prefix('assets')->name('assets.')->group(function () {
         Route::post('/import-parse', 'parse')->name('import-parse');
+        Route::get('/import/mapping', 'mapping')->name('import-mapping');
+        Route::post('/import/mapping', 'processMapping')->name('import.process-mapping');
+        Route::post('/import/cancel', 'cancel')->name('import.cancel');
+        Route::get('/import/status', 'status')->name('import-status');
         Route::get('/import-rapid-add', 'rapidAdd')->name('import-rapid-add');
         Route::post('/import-rapid-add', 'storeRapidAdd')->name('import-rapid-add.store');
         Route::get('/import-review', 'review')->name('import-review');
         Route::post('/import-store', 'store')->name('import-store');
+        Route::post('/import/store-batch', 'storeBatch')->name('import-store-batch');
+        Route::post('/import-calculate-validation', 'calculateValidation')->name('import-calculate-validation');
+        Route::post('/import/update-row', 'updateSingleRow')->name('import.update-row');
         Route::get('/bulk-manual', 'bulkManual')->name('bulk-manual');
     });
 

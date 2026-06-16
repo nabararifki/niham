@@ -1,4 +1,4 @@
-<div x-data="{ openAssetModal: false }" @open-add-asset-modal.window="openAssetModal = true">
+<div x-data="{ openAssetModal: new URLSearchParams(window.location.search).has('import') || new URLSearchParams(window.location.search).get('action') === 'add_asset' || new URLSearchParams(window.location.search).get('open_modal') === 'true' || new URLSearchParams(window.location.search).has('open_modal') }" @open-add-asset-modal.window="openAssetModal = true">
     <!-- The actual modal body -->
     <template x-teleport="body">
         <div x-show="openAssetModal" 
@@ -32,7 +32,7 @@
                         </div>
                         <div>
                             <h3 class="font-semibold text-gray-900 dark:text-gray-100 text-sm mb-1">{{ __('assets.single_add') }}</h3>
-                            <p class="text-xs text-gray-500 dark:text-gray-400">Manually enter details for a single new asset.</p>
+                            <p class="text-xs text-gray-500 dark:text-gray-400">{{ __('assets.single_add_desc') }}</p>
                         </div>
                     </a>
 
@@ -43,7 +43,7 @@
                         </div>
                         <div>
                             <h3 class="font-semibold text-gray-900 dark:text-gray-100 text-sm mb-1">{{ __('assets.bulk_add_manual') }}</h3>
-                            <p class="text-xs text-gray-500 dark:text-gray-400">Manually fill a spreadsheet-like form for multiple assets.</p>
+                            <p class="text-xs text-gray-500 dark:text-gray-400">{{ __('assets.bulk_add_manual_desc') }}</p>
                         </div>
                     </a>
 
@@ -55,7 +55,7 @@
                             </div>
                             <div class="flex-1">
                                 <h3 class="font-semibold text-gray-900 dark:text-gray-100 text-sm mb-1">{{ __('assets.smart_import') }}</h3>
-                                <p class="text-xs text-gray-500 dark:text-gray-400">Upload an Excel (.xlsx) or CSV file to auto-detect and import assets.</p>
+                                <p class="text-xs text-gray-500 dark:text-gray-400">{{ __('assets.smart_import_desc') }}</p>
                             </div>
                             <div class="text-gray-400">
                                 <svg class="w-5 h-5 transition-transform duration-200" :class="uploadFormOpen ? 'rotate-180' : ''" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
@@ -63,40 +63,40 @@
                         </button>
                         
                         <div x-show="uploadFormOpen" x-collapse>
-                            <div class="p-4 pt-0 border-t border-gray-200/50 dark:border-gray-700/50 bg-white/50 dark:bg-gray-800/50"
-                                 x-data="importUploader()"
-                                 x-ref="uploaderRoot">
-                                
-                                <div class="mt-4 mb-4">
-                                    <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">{{ __('assets.upload_prompt') }}</label>
-                                    <input type="file" x-ref="fileInput" accept=".csv,.xlsx" required
-                                        @change="onFileSelect($event)"
-                                        class="block w-full text-sm text-gray-700 dark:text-gray-200 file:mr-3 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:uppercase file:tracking-wider file:bg-emerald-100 file:dark:bg-emerald-900/40 file:text-emerald-700 file:dark:text-emerald-400 hover:file:bg-emerald-200 dark:hover:file:bg-emerald-900/60 file:cursor-pointer file:transition-colors border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-900/50 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500" />
-                                    
-                                    <!-- Large file warning -->
-                                    <div x-show="largeFileWarning" x-cloak
-                                         class="mt-2 text-xs text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 p-2 rounded border border-amber-200 dark:border-amber-800/50 flex items-center gap-2">
-                                        <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z"/></svg>
-                                        <span x-text="largeFileWarning"></span>
-                                    </div>
-                                    
-                                    <!-- Error message -->
-                                    <div x-show="errorMessage" x-cloak
-                                         class="mt-2 text-sm text-red-600 dark:text-red-400 font-semibold bg-red-50 dark:bg-red-900/20 p-2 rounded border border-red-200 dark:border-red-800/50"
-                                         x-text="errorMessage"></div>
-                                </div>
-
-                                <div class="flex justify-end gap-2">
-                                    <button type="button" 
-                                            @click="uploadFile()"
-                                            :disabled="isParsing || !hasFile"
-                                            class="inline-flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold uppercase tracking-widest rounded-lg transition-all duration-200 shadow-sm hover:shadow-md disabled:opacity-50 disabled:cursor-not-allowed">
-                                        <x-heroicon-o-cloud-arrow-up class="w-4 h-4" x-show="!isParsing" />
-                                        <svg x-show="isParsing" x-cloak class="animate-spin h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                                            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                                            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                                        </svg>
-                                        <span x-show="!isParsing">Upload & Scan</span>
+                             <div class="p-4 pt-0 border-t border-gray-200/50 dark:border-gray-700/50 bg-white/50 dark:bg-gray-800/50"
+                                  x-data="importUploader()"
+                                  x-ref="uploaderRoot">
+                                 
+                                 <div class="mt-4 mb-4">
+                                     <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">{{ __('assets.upload_prompt') }}</label>
+                                     <input type="file" x-ref="fileInput" accept=".csv,.xlsx" required
+                                         @change="onFileSelect($event)"
+                                         class="block w-full text-sm text-gray-700 dark:text-gray-200 file:mr-3 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:uppercase file:tracking-wider file:bg-emerald-100 file:dark:bg-emerald-900/40 file:text-emerald-700 file:dark:text-emerald-400 hover:file:bg-emerald-200 dark:hover:file:bg-emerald-900/60 file:cursor-pointer file:transition-colors border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-900/50 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500" />
+                                     
+                                     <!-- Large file warning -->
+                                     <div x-show="largeFileWarning" x-cloak
+                                          class="mt-2 text-xs text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 p-2 rounded border border-amber-200 dark:border-amber-800/50 flex items-center gap-2">
+                                         <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z"/></svg>
+                                         <span x-text="largeFileWarning"></span>
+                                     </div>
+                                     
+                                     <!-- Error message -->
+                                     <div x-show="errorMessage" x-cloak
+                                          class="mt-2 text-sm text-red-600 dark:text-red-400 font-semibold bg-red-50 dark:bg-red-900/20 p-2 rounded border border-red-200 dark:border-red-800/50"
+                                          x-text="errorMessage"></div>
+                                 </div>
+ 
+                                 <div class="flex justify-end gap-2">
+                                     <button type="button" 
+                                             @click="uploadFile()"
+                                             :disabled="isParsing || !hasFile"
+                                             class="inline-flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold uppercase tracking-widest rounded-lg transition-all duration-200 shadow-sm hover:shadow-md disabled:opacity-50 disabled:cursor-not-allowed">
+                                         <x-heroicon-o-cloud-arrow-up class="w-4 h-4" x-show="!isParsing" />
+                                         <svg x-show="isParsing" x-cloak class="animate-spin h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                             <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                                             <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                         </svg>
+                                         <span x-show="!isParsing">{{ __('assets.upload_and_scan') }}</span>
                                         <span x-show="isParsing" x-cloak>{{ __('assets.scanning_data') }}</span>
                                     </button>
                                 </div>
@@ -170,16 +170,34 @@ function importUploader() {
                     }
                 });
                 
-                const data = await response.json();
+                const text = await response.text();
+                
+                if (!response.ok) {
+                    if (response.status === 413) {
+                        throw new Error('Payload Too Large: File exceeds server limits.');
+                    } else if (response.status === 504) {
+                        throw new Error('Server Timeout: File is too large or processing took too long.');
+                    } else if (response.status >= 500) {
+                        throw new Error('Server Error: ' + response.statusText);
+                    }
+                }
+                
+                let data;
+                try {
+                    data = JSON.parse(text);
+                } catch (parseErr) {
+                    console.error('Raw response:', text);
+                    throw new Error('Invalid server response. Please check server logs.');
+                }
                 
                 if (response.ok && data.success) {
-                    window.location.href = data.redirect;
+                    window.location.href = data.redirect_url;
                 } else {
-                    this.errorMessage = data.message || 'An unknown error occurred.';
+                    this.errorMessage = data.message || @json(__('assets.unknown_error'));
                     this.isParsing = false;
                 }
             } catch (err) {
-                this.errorMessage = err.message || 'Network communication failed.';
+                this.errorMessage = err.message || @json(__('assets.network_error'));
                 this.isParsing = false;
             }
         }

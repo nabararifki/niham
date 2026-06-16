@@ -38,6 +38,8 @@ class SmartImportTest extends TestCase
     {
         parent::setUp();
 
+        \Illuminate\Support\Facades\Storage::fake('local');
+
         $this->propertyA = Property::factory()->create(['name' => 'Hotel Alpha', 'code' => 'HA']);
         $roleA = Role::factory()->create([
             'property_id' => $this->propertyA->id,
@@ -257,16 +259,40 @@ class SmartImportTest extends TestCase
             'import_file' => $uploadedFile,
         ]);
 
+        $response->assertStatus(200);
+
         clearstatcache();
-        $this->assertFileDoesNotExist($tmpFile, 'File was not deleted after parse.');
+        $this->assertFileDoesNotExist($tmpFile, 'Uploaded /tmp file was not deleted after copy.');
+
+        $cacheKey = 'import_state_' . $this->userA->id;
+        $state = Cache::get($cacheKey);
+        $this->assertNotNull($state);
+        $storedPath = $state['temp_file_path'];
+        $this->assertTrue(\Illuminate\Support\Facades\Storage::disk('local')->exists($storedPath));
+
+        $payload = [
+            'temp_file_path' => $storedPath,
+            'mapping' => [
+                'name' => ['columns' => ['Name'], 'separator' => ' '],
+                'tag' => ['columns' => ['Tag'], 'separator' => ' '],
+            ],
+        ];
+
+        Cache::put($cacheKey, array_merge($state, ['true_header' => ['Name', 'Tag']]), 1800);
+
+        $mappingResponse = $this->post(route('assets.import.process-mapping'), [
+            'payload' => json_encode($payload),
+        ]);
+
+        $mappingResponse->assertStatus(200);
+        $mappingResponse->assertJson(['success' => true]);
+        $this->assertFalse(\Illuminate\Support\Facades\Storage::disk('local')->exists($storedPath));
     }
 
     public function test_uploaded_file_is_deleted_on_parse_failure(): void
     {
-        // Upload a file with no detectable header (will fail after 15 rows)
-        $content = str_repeat("x,y,z\n", 20);
         $tmpFile = tempnam(sys_get_temp_dir(), 'gc_fail_');
-        file_put_contents($tmpFile, $content);
+        file_put_contents($tmpFile, "  ,  \n  ,  \n");
         $uploadedFile = new UploadedFile($tmpFile, 'test.csv', 'text/csv', null, true);
 
         $this->actingAs($this->userA);
@@ -284,7 +310,7 @@ class SmartImportTest extends TestCase
     // 4. CONTROLLER FLOW TESTS (Parse → Cache → Review → Store)
     // ══════════════════════════════════════════════════════════════
 
-    public function test_parse_returns_json_with_cache_key_and_redirect(): void
+    public function test_parse_returns_json_with_redirect_url(): void
     {
         $csv = "Name,Tag,Serial Number\nTest Asset,TA-001,SN001\n";
         $tmpFile = tempnam(sys_get_temp_dir(), 'flow_test_');
@@ -298,14 +324,15 @@ class SmartImportTest extends TestCase
         ]);
 
         $response->assertStatus(200);
-        $response->assertJsonStructure(['success', 'cache_key', 'row_count', 'redirect']);
-        $response->assertJson(['success' => true, 'row_count' => 1]);
+        $response->assertJsonStructure(['success', 'redirect_url']);
+        $response->assertJson(['success' => true, 'redirect_url' => route('assets.import-mapping')]);
 
-        // Verify cache was populated
-        $cacheKey = 'import_review_'.$this->userA->id;
+        $cacheKey = 'import_state_'.$this->userA->id;
         $cached = Cache::get($cacheKey);
         $this->assertNotNull($cached);
-        $this->assertCount(1, $cached);
+        $this->assertEquals(['Name', 'Tag', 'Serial Number'], $cached['true_header']);
+
+        @unlink($tmpFile);
     }
 
     public function test_review_page_loads_with_cached_data(): void
@@ -446,5 +473,148 @@ class SmartImportTest extends TestCase
             ->whereIn('tag', ['BA-001', 'BA-002', 'BA-003'])
             ->count();
         $this->assertEquals(3, $count, 'Not all 3 bulk assets were inserted.');
+    }
+
+    public function test_sheet_selector_re_peeks_file_and_updates_cache(): void
+    {
+        $this->actingAs($this->userA);
+
+        // Prepare mock cache
+        $cacheKey = 'import_state_' . $this->userA->id;
+        Cache::put($cacheKey, [
+            'temp_file_path' => 'temp/test_import.xlsx',
+            'sheets' => ['Sheet1', 'Sheet2'],
+            'true_header' => ['Old Header'],
+            'preview_data' => [['Old Header' => 'Old Value']],
+            'mapping_proposals' => [],
+            'current_sheet_index' => 0,
+            'selected_sheet' => 0,
+        ], 1800);
+
+        // Fake the physical file existence
+        \Illuminate\Support\Facades\Storage::fake('local');
+        \Illuminate\Support\Facades\Storage::disk('local')->put('temp/test_import.xlsx', 'dummy binary excel content');
+
+        // Mock the AssetImportService
+        $this->mock(AssetImportService::class, function ($mock) {
+            $mock->shouldReceive('peek')
+                ->once()
+                ->with(\Illuminate\Support\Facades\Storage::disk('local')->path('temp/test_import.xlsx'), 'xlsx', 1)
+                ->andReturn([
+                    'sheets' => ['Sheet1', 'Sheet2'],
+                    'true_header' => ['New Header'],
+                    'preview_data' => [['New Header' => 'New Value']],
+                    'mapping_proposals' => ['tag' => ['New Header']],
+                ]);
+        });
+
+        // Request with ?sheet=1 to switch sheets
+        $response = $this->get(route('assets.import-mapping', ['sheet' => 1]));
+
+        $response->assertStatus(200);
+
+        // Verify that the cache was updated with the fresh sheet data!
+        $updatedCached = Cache::get($cacheKey);
+        $this->assertNotNull($updatedCached);
+        $this->assertEquals(['New Header'], $updatedCached['true_header']);
+        $this->assertEquals([['New Header' => 'New Value']], $updatedCached['preview_data']);
+        $this->assertEquals(1, $updatedCached['current_sheet_index']);
+        $this->assertEquals('1', $updatedCached['selected_sheet']);
+    }
+
+    public function test_heatmap_validation_and_pagination_highlighting(): void
+    {
+        $this->actingAs($this->userA);
+
+        $cacheKey = 'import_review_' . $this->userA->id;
+
+        // Generate 110 rows:
+        // Index 5 (Page 1) is invalid (missing name)
+        // Index 55 (Page 2) is invalid (missing category_id)
+        // Others are valid
+        $data = [];
+        for ($i = 0; $i < 110; $i++) {
+            if ($i === 5) {
+                $data[] = [
+                    'name' => '',
+                    'tag' => 'TAG-5',
+                    'category_id' => $this->categoryA->id,
+                    'department_id' => $this->departmentA->id,
+                    'status' => 'in_service'
+                ];
+            } elseif ($i === 55) {
+                $data[] = [
+                    'name' => 'Row 55',
+                    'tag' => 'TAG-55',
+                    'category_id' => '',
+                    'department_id' => $this->departmentA->id,
+                    'status' => 'in_service'
+                ];
+            } else {
+                $data[] = [
+                    'name' => 'Valid Row ' . $i,
+                    'tag' => 'TAG-' . $i,
+                    'category_id' => $this->categoryA->id,
+                    'department_id' => $this->departmentA->id,
+                    'status' => 'in_service'
+                ];
+            }
+        }
+
+        Cache::put($cacheKey, $data, now()->addMinutes(30));
+
+        $response = $this->get(route('assets.import-review', ['page' => 1]));
+        $response->assertStatus(200);
+        $response->assertViewHas('invalidPages', [1, 2]);
+
+        // Check that page 1 has the highlighted invalid row and error styles
+        $response->assertSee('border-l-4 border-error');
+        $response->assertSee('bg-red-50 dark:bg-red-900/20');
+
+        // Check for the absolute positioned red indicator dots in pagination
+        $response->assertSee('animate-ping');
+        $response->assertSee('bg-red-500');
+    }
+
+    public function test_auto_save_endpoint_updates_cache_and_recalculates_validation(): void
+    {
+        $this->actingAs($this->userA);
+
+        $cacheKey = 'import_review_' . $this->userA->id;
+
+        // Start with an invalid row (index 5) missing name
+        $data = [
+            5 => [
+                'name' => '',
+                'tag' => 'TAG-5',
+                'category_id' => $this->categoryA->id,
+                'department_id' => $this->departmentA->id,
+                'status' => 'in_service',
+                'is_invalid' => true
+            ]
+        ];
+
+        Cache::put($cacheKey, $data, now()->addMinutes(30));
+
+        // Submit auto-save edit to fix the name of the row (index 5)
+        $response = $this->postJson(route('assets.import.update-row'), [
+            'absolute_index' => 5,
+            'field_name' => 'name',
+            'new_value' => 'Now Valid Name'
+        ]);
+
+        $response->assertStatus(200);
+        $response->assertJson([
+            'success' => true,
+            'is_invalid' => false,
+            'invalidPages' => [],
+            'validCount' => 1,
+            'invalidCount' => 0
+        ]);
+
+        // Assert that the cache has been updated
+        $updatedData = Cache::get($cacheKey);
+        $this->assertEquals('Now Valid Name', $updatedData[5]['name']);
+        $this->assertFalse($updatedData[5]['is_invalid']);
     }
 }

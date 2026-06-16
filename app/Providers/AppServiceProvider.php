@@ -5,6 +5,7 @@ namespace App\Providers;
 use Illuminate\Support\ServiceProvider;
 use Illuminate\Support\Facades\View;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Pagination\Paginator;
 use App\Models\Property;
 use App\Models\Asset;
 use App\Observers\AssetObserver;
@@ -27,6 +28,9 @@ class AppServiceProvider extends ServiceProvider
     public function boot(): void
     {
         Model::shouldBeStrict(! $this->app->isProduction());
+
+        // Use Tailwind pagination globally (matches the app's Tailwind design system)
+        Paginator::defaultView('pagination::tailwind');
 
         Asset::observe(AssetObserver::class);
 

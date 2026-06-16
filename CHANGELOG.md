@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0] - 2026-06-16
+### Added
+- **Enterprise Smart Importer**: Added a low-memory, asynchronous Excel/CSV streaming import pipeline supporting 100K+ rows via `OpenSpout`.
+- **Hybrid Matching Pipeline**: Added a smart matching system using Exact Match, Dictionary config, and Jaro-Winkler distance to dynamically propose column mapping.
+- **Asynchronous Processing Queue**: Added `ProcessImportJob` to execute data streaming and mapping as a background task.
+- **AJAX Auto-Save reviews**: Added dynamic row/cell editing and syncing back to cache in real-time during bulk review.
+- **Batch Processing Modal**: Added chunked saving (500-row batches) with an active progress bar to prevent PHP timeout and memory issues.
+- **Pre-flight Check**: Added calculation and display of valid vs. invalid rows.
+- **Interactive Sheet Selector**: Added multi-sheet selection support for Excel files.
+- **Custom Mapping Separators**: Added support for multi-column merges with custom separators.
+- **Dynamic Indicators**: Added page invalidation pings/badges on the paginator dynamically synced via Alpine.js.
+- **Notifications**: Added `BulkImportSuccessfulNotification` upon successful asynchronous import completion.
+
+### Changed
+- **Tailwind Config & Styling**: Expanded theme mapping and DaisyUI styles for brand harmonization.
+- **Paginator Overhaul**: Replaced default pagination with a memory-optimized and error-highlighting paginator view.
+
 ## [0.13.0] - 2026-04-05
 ### Added
 - **Location Feature**: Implemented a comprehensive Location module to track assets by physical spaces.

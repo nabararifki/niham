@@ -16,6 +16,7 @@
 
 ## ✨ Main Features
 
+- **Enterprise Smart Importer:** Asynchronous 100K+ rows processing with graceful partial bulk inserts, smart column-mapping heuristics (Jaro-Winkler), and live Alpine/AJAX reviews.
 - **Location Management:** Track and organize assets by specific physical locations within your hotel property.
 - **Smart Scanning:** Upload an image of an asset's data plate, and let the AI automatically fill in the details like Serial Numbers and Brands.
 - **Easy Tracking:** Monitor where your assets are, their current condition, and when their warranty expires.

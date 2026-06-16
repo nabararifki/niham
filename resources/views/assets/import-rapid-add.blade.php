@@ -7,6 +7,8 @@
 
     <div class="py-12">
         <div class="max-w-4xl mx-auto sm:px-6 lg:px-8">
+            @include('assets.import.partials.stepper', ['currentStep' => 3])
+
             <div class="bg-white/90 dark:bg-gray-800/90 backdrop-blur-md shadow-xl sm:rounded-2xl border border-gray-200/50 dark:border-gray-700/50 overflow-hidden">
                 <form action="{{ route('assets.import-rapid-add.store') }}" method="POST"
                       x-data="{
