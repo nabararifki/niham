@@ -617,4 +617,65 @@ class SmartImportTest extends TestCase
         $this->assertEquals('Now Valid Name', $updatedData[5]['name']);
         $this->assertFalse($updatedData[5]['is_invalid']);
     }
+
+    public function test_clean_abandoned_imports_command(): void
+    {
+        // Fake local storage
+        \Illuminate\Support\Facades\Storage::fake('local');
+        $disk = \Illuminate\Support\Facades\Storage::disk('local');
+
+        // Create an old file (>60 minutes) and a new file (<60 minutes)
+        $disk->put('temp/old_import.xlsx', 'old content');
+        $disk->put('temp/new_import.xlsx', 'new content');
+
+        $oldPath = $disk->path('temp/old_import.xlsx');
+        $newPath = $disk->path('temp/new_import.xlsx');
+
+        @mkdir(dirname($oldPath), 0777, true);
+        file_put_contents($oldPath, 'old content');
+        file_put_contents($newPath, 'new content');
+
+        // Set last modified of old path to 90 minutes ago
+        touch($oldPath, time() - (90 * 60));
+        // Set last modified of new path to now
+        touch($newPath, time());
+
+        // Prepare some expired cache records
+        if (config('cache.default') === 'database') {
+            $prefix = config('cache.prefix');
+            \Illuminate\Support\Facades\DB::table('cache')->insert([
+                [
+                    'key' => $prefix . 'import_state_9999',
+                    'value' => serialize('state_value'),
+                    'expiration' => time() - 3600, // Expired 1 hour ago
+                ],
+                [
+                    'key' => $prefix . 'import_state_8888',
+                    'value' => serialize('state_value'),
+                    'expiration' => time() + 3600, // Active 1 hour from now
+                ]
+            ]);
+        }
+
+        // Run the command
+        $this->artisan('app:clean-abandoned-imports')
+            ->expectsOutputToContain('Starting clean up of abandoned imports...')
+            ->expectsOutputToContain('Cleaned up 1 abandoned temporary import file(s).')
+            ->assertExitCode(0);
+
+        // Assert file statuses
+        $this->assertFalse($disk->exists('temp/old_import.xlsx'));
+        $this->assertTrue($disk->exists('temp/new_import.xlsx'));
+
+        // Assert cache statuses
+        if (config('cache.default') === 'database') {
+            $prefix = config('cache.prefix');
+            $this->assertFalse(\Illuminate\Support\Facades\DB::table('cache')->where('key', $prefix . 'import_state_9999')->exists());
+            $this->assertTrue(\Illuminate\Support\Facades\DB::table('cache')->where('key', $prefix . 'import_state_8888')->exists());
+            
+            // Cleanup database records
+            \Illuminate\Support\Facades\DB::table('cache')->where('key', $prefix . 'import_state_8888')->delete();
+        }
+    }
 }
+

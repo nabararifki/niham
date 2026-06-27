@@ -9,3 +9,5 @@ Artisan::command('inspire', function () {
 
 use Illuminate\Support\Facades\Schedule;
 Schedule::command('app:send-email-digests')->hourly();
+Schedule::command('app:clean-abandoned-imports')->hourly();
+
