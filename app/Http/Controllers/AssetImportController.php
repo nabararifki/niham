@@ -45,52 +45,38 @@ class AssetImportController extends Controller
         }
 
         try {
-            // FASE 1: Simpan file ke direktori temp (Jangan di-unlink/dihapus)
+            // Store uploaded file into local temp storage
             $fileName = uniqid('import_') . '.' . $extension;
             $path = $file->storeAs('temp', $fileName, 'local');
             if (!$path) {
                 throw new \Exception('Failed to store the uploaded file.');
             }
-            $fullPath = \Illuminate\Support\Facades\Storage::disk('local')->path($path);
+            $fullPath = Storage::disk('local')->path($path);
 
-            $realPath = $file->getRealPath();
-            clearstatcache();
-            if ($realPath && file_exists($realPath)) {
-                @unlink($realPath);
-            }
-
-            // FASE 1: Ekstraksi Sampel & True Header (Hybrid Pipeline)
+            // Extract sample & true header (Hybrid Pipeline)
             $peekResult = $this->importService->peek($fullPath, $extension);
 
             $dataArray = [
-                'temp_file_path' => $path,
-                'sheets' => $peekResult['sheets'],
-                'true_header' => $peekResult['true_header'],
-                'preview_data' => $peekResult['preview_data'],
+                'temp_file_path'    => $path,
+                'sheets'            => $peekResult['sheets'],
+                'true_header'       => $peekResult['true_header'],
+                'preview_data'      => $peekResult['preview_data'],
                 'mapping_proposals' => $peekResult['mapping_proposals'],
                 'current_sheet_index' => 0,
             ];
 
-            \Illuminate\Support\Facades\Cache::put('import_state_'.auth()->id(), $dataArray, 1800);
+            Cache::put('import_state_' . auth()->id(), $dataArray, 1800);
 
-            // FASE 1: Kembalikan JSON dengan redirect URL
             return response()->json([
-                'success' => true,
+                'success'      => true,
                 'redirect_url' => route('assets.import-mapping'),
             ]);
 
         } catch (\Exception $e) {
-            Log::error('Import Parse Failure: '.$e->getMessage());
+            Log::error('Import Parse Failure: ' . $e->getMessage());
 
             if (isset($path)) {
-                \Illuminate\Support\Facades\Storage::disk('local')->delete($path);
-            }
-            if (isset($file) && method_exists($file, 'getRealPath')) {
-                $realPath = $file->getRealPath();
-                clearstatcache();
-                if ($realPath && file_exists($realPath)) {
-                    @unlink($realPath);
-                }
+                Storage::disk('local')->delete($path);
             }
 
             return response()->json([
@@ -407,18 +393,7 @@ class AssetImportController extends Controller
             return $redirect;
         }
 
-        // Return view (for rapid add display, which will be implemented in Batch 3)
-        if (view()->exists('assets.import-rapid-add')) {
-            return view('assets.import-rapid-add', compact('missingCategories', 'missingDepartments'));
-        }
-
-        // Demo output for Batch 1/2 Verification
-        return response()->json([
-            'status' => 'intercepted_for_rapid_add',
-            'missing_categories' => $missingCategories,
-            'missing_departments' => $missingDepartments,
-            'warnings' => $warnings,
-        ]);
+        return view('assets.import.rapid-add', compact('missingCategories', 'missingDepartments'));
     }
 
     /**
@@ -584,7 +559,7 @@ class AssetImportController extends Controller
         // across pages and the store() can process submitted edits correctly.
         $pageOffset = ($currentPage - 1) * $perPage;
 
-        return view('assets.import-review', compact(
+        return view('assets.import.review', compact(
             'paginatedData',
             'categories',
             'departments',
@@ -640,7 +615,7 @@ class AssetImportController extends Controller
         $pageOffset     = 0;
         $invalidPages   = [];
 
-        return view('assets.import-review', compact(
+        return view('assets.import.review', compact(
             'paginatedData', 'categories', 'departments',
             'categoriesMap', 'departmentsMap', 'warning', 'pageOffset', 'total',
             'validCount', 'invalidCount', 'invalidPages'
@@ -703,26 +678,42 @@ class AssetImportController extends Controller
             $validData[] = $item;
         }
 
+        $propertyId = auth()->user()->isSuperAdmin()
+            ? session('active_property_id')
+            : auth()->user()->property_id;
+
+        $insertRows = [];
+        foreach ($validData as $item) {
+            $tag = !empty($item['tag']) ? $item['tag'] : ('AST-' . strtoupper(substr(uniqid(), -6)));
+            $remarks = !empty($item['remarks'])
+                ? $item['remarks']
+                : (!empty($item['model']) ? 'Imported. Model: ' . $item['model'] : 'Imported.');
+            if (strlen($remarks) > 120) {
+                $remarks = substr($remarks, 0, 117) . '...';
+            }
+
+            $insertRows[] = [
+                'uuid'          => (string) \Illuminate\Support\Str::orderedUuid(),
+                'name'          => $item['name'] ?? '',
+                'tag'           => $tag,
+                'category_id'   => !empty($item['category_id']) ? (int) $item['category_id'] : null,
+                'department_id' => !empty($item['department_id']) ? (int) $item['department_id'] : null,
+                'status'        => $item['status'] ?? 'in_service',
+                'serial_number' => $item['serial_number'] ?? null,
+                'purchase_date' => !empty($item['purchase_date']) ? $item['purchase_date'] : null,
+                'purchase_cost' => is_numeric($item['purchase_cost'] ?? '') ? $item['purchase_cost'] : null,
+                'remarks'       => $remarks,
+                'editor'        => $editorId,
+                'property_id'   => $propertyId,
+                'created_at'    => now(),
+                'updated_at'    => now(),
+            ];
+        }
+
         \DB::beginTransaction();
         try {
-            // Chunk into batches of 500 to avoid DB parameter limits
-            foreach (array_chunk($validData, 500) as $chunk) {
-                foreach ($chunk as $item) {
-                    \App\Models\Asset::create([
-                        'name'          => $item['name'] ?? '',
-                        'tag'           => !empty($item['tag']) ? $item['tag'] : ('AST-' . strtoupper(substr(uniqid(), -6))),
-                        'category_id'   => !empty($item['category_id']) ? $item['category_id'] : null,
-                        'department_id' => !empty($item['department_id']) ? $item['department_id'] : null,
-                        'status'        => $item['status'] ?? 'in_service',
-                        'serial_number' => $item['serial_number'] ?? null,
-                        'purchase_date' => !empty($item['purchase_date']) ? $item['purchase_date'] : null,
-                        'purchase_cost' => is_numeric($item['purchase_cost'] ?? '') ? $item['purchase_cost'] : null,
-                        'remarks'       => !empty($item['remarks'])
-                            ? $item['remarks']
-                            : (!empty($item['model']) ? 'Imported. Model: ' . $item['model'] : 'Imported.'),
-                        'editor'        => $editorId,
-                    ]);
-                }
+            foreach (array_chunk($insertRows, 500) as $chunk) {
+                \DB::table('assets')->insert($chunk);
             }
             \DB::commit();
         } catch (\Exception $e) {

@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.3] - 2026-07-14
+### Changed
+- **Database Persistence Optimization**: Migrated the store method in `AssetImportController` to perform chunked bulk inserts (`DB::table('assets')->insert`) rather than looping individual Eloquent model creates, reducing memory consumption and improving database persistence speed.
+- **Import Directory Reorganization**: Moved asset import views into a nested folder layout under `resources/views/assets/import/` (relocated `pagination.blade.php`, `rapid-add.blade.php`, and `review.blade.php`) and updated corresponding controller rendering paths.
+- **Target Sheet Reader Enhancement**: Updated `AssetImportService::readRows` to accept a specific sheet index, preventing unnecessary sheet parsing.
+- **Field Mapping Expansion**: Included `purchase_cost` mapping to support importing asset costs from source files.
+
+### Fixed
+- **Cleaned File Handling**: Streamlined temp file handling and removed redundant local unlinking operations inside the controller parser.
+
 ## [0.14.2] - 2026-06-27
 ### Fixed
 - **Storage Leak Resolution**: Implemented `CleanAbandonedImports` Artisan command (`app:clean-abandoned-imports`) to prune abandoned temporary Excel/CSV import files older than 60 minutes and automatically clear expired import cache records from the database.

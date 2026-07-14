@@ -366,7 +366,7 @@ class AssetImportService
      * Generator: yields rows one at a time from CSV or XLSX.
      * Memory-efficient — never loads entire file.
      */
-    private function readRows(string $filePath, string $extension): Generator
+    private function readRows(string $filePath, string $extension, int $sheetIndex = 0): Generator
     {
         if ($extension === 'csv') {
             $options = new CsvOptions();
@@ -379,17 +379,21 @@ class AssetImportService
         $reader->open($filePath);
 
         $rowIndex = 0;
+        $currentSheet = 0;
         foreach ($reader->getSheetIterator() as $sheet) {
-            foreach ($sheet->getRowIterator() as $row) {
-                /** @var Row $row */
-                $cells = array_map(function ($val) {
-                    return is_string($val) ? trim($val) : $val;
-                }, $row->toArray());
+            if ($currentSheet === $sheetIndex) {
+                foreach ($sheet->getRowIterator() as $row) {
+                    /** @var Row $row */
+                    $cells = array_map(function ($val) {
+                        return is_string($val) ? trim($val) : $val;
+                    }, $row->toArray());
 
-                yield $rowIndex => $cells;
-                $rowIndex++;
+                    yield $rowIndex => $cells;
+                    $rowIndex++;
+                }
+                break; // Only process the target sheet
             }
-            break; // Only process the first sheet
+            $currentSheet++;
         }
 
         $reader->close();
@@ -453,15 +457,16 @@ class AssetImportService
         $combined = trim("{$brand} {$model}");
 
         return [
-            'tag'           => $get('tag'),
-            'name'          => $get('name'),
-            'category_id'   => '', // Will be mapped by user on review page
-            'department_id' => '', // Will be mapped by user on review page
-            'status'        => $this->normalizeStatus($get('status')),
-            'model'         => $combined,
-            'serial_number' => $get('serial_number'),
-            'purchase_date' => $get('purchase_date'),
-            '_category_hint' => $get('category'),
+            'tag'              => $get('tag'),
+            'name'             => $get('name'),
+            'category_id'      => '', // Will be mapped by user on review page
+            'department_id'    => '', // Will be mapped by user on review page
+            'status'           => $this->normalizeStatus($get('status')),
+            'model'            => $combined,
+            'serial_number'    => $get('serial_number'),
+            'purchase_date'    => $get('purchase_date'),
+            'purchase_cost'    => $get('cost'),
+            '_category_hint'   => $get('category'),
             '_department_hint' => $get('department'),
         ];
     }

@@ -273,7 +273,7 @@
                                     ]) }}
                                 </p>
                                 <div class="text-sm">
-                                    {{ $paginatedData->links('assets.import-pagination', ['invalidPages' => $invalidPages]) }}
+                                    {{ $paginatedData->links('assets.import.pagination', ['invalidPages' => $invalidPages]) }}
                                 </div>
                             </div>
                         @endif
