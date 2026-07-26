@@ -67,6 +67,7 @@ Route::middleware('auth')->group(function () {
         Route::post('/import/store-batch', 'storeBatch')->name('import-store-batch');
         Route::post('/import-calculate-validation', 'calculateValidation')->name('import-calculate-validation');
         Route::post('/import/update-row', 'updateSingleRow')->name('import.update-row');
+        Route::post('/import/delete-row', 'deleteRow')->name('import.delete-row');
         Route::get('/bulk-manual', 'bulkManual')->name('bulk-manual');
     });
 

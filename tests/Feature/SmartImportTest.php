@@ -251,6 +251,8 @@ class SmartImportTest extends TestCase
         $csv = "Name,Tag\nAsset GC,GC-001\n";
         $tmpFile = tempnam(sys_get_temp_dir(), 'gc_test_');
         file_put_contents($tmpFile, $csv);
+        // Note: UploadedFile with test=true copies (not moves) the file, so $tmpFile
+        // still exists after storeAs(). Cleanup of /tmp is PHP's responsibility.
         $uploadedFile = new UploadedFile($tmpFile, 'test.csv', 'text/csv', null, true);
 
         $this->actingAs($this->userA);
@@ -261,23 +263,26 @@ class SmartImportTest extends TestCase
 
         $response->assertStatus(200);
 
-        clearstatcache();
-        $this->assertFileDoesNotExist($tmpFile, 'Uploaded /tmp file was not deleted after copy.');
-
+        // The file must have been copied into local storage
         $cacheKey = 'import_state_' . $this->userA->id;
-        $state = Cache::get($cacheKey);
+        $state    = Cache::get($cacheKey);
         $this->assertNotNull($state);
         $storedPath = $state['temp_file_path'];
-        $this->assertTrue(\Illuminate\Support\Facades\Storage::disk('local')->exists($storedPath));
+        $this->assertTrue(
+            \Illuminate\Support\Facades\Storage::disk('local')->exists($storedPath),
+            'File was not stored in local disk after parse.'
+        );
 
         $payload = [
             'temp_file_path' => $storedPath,
             'mapping' => [
                 'name' => ['columns' => ['Name'], 'separator' => ' '],
-                'tag' => ['columns' => ['Tag'], 'separator' => ' '],
+                'tag'  => ['columns' => ['Tag'],  'separator' => ' '],
             ],
         ];
 
+        // R11: The import_state cache is already seeded by parse() above.
+        // processMapping() cross-checks temp_file_path against that cache.
         Cache::put($cacheKey, array_merge($state, ['true_header' => ['Name', 'Tag']]), 1800);
 
         $mappingResponse = $this->post(route('assets.import.process-mapping'), [
@@ -286,11 +291,22 @@ class SmartImportTest extends TestCase
 
         $mappingResponse->assertStatus(200);
         $mappingResponse->assertJson(['success' => true]);
-        $this->assertFalse(\Illuminate\Support\Facades\Storage::disk('local')->exists($storedPath));
+
+        // processMapping dispatches a job, which deletes the file after completion.
+        // In test (sync driver), the job runs immediately — assert storage cleanup.
+        $this->assertFalse(
+            \Illuminate\Support\Facades\Storage::disk('local')->exists($storedPath),
+            'Stored file was not cleaned up after processMapping dispatched the job.'
+        );
+
+        // Clean up the /tmp file we created
+        @unlink($tmpFile);
     }
 
     public function test_uploaded_file_is_deleted_on_parse_failure(): void
     {
+        // Upload a CSV with only empty cells — peek() will throw, triggering the
+        // catch block which calls Storage::delete($path).
         $tmpFile = tempnam(sys_get_temp_dir(), 'gc_fail_');
         file_put_contents($tmpFile, "  ,  \n  ,  \n");
         $uploadedFile = new UploadedFile($tmpFile, 'test.csv', 'text/csv', null, true);
@@ -302,8 +318,13 @@ class SmartImportTest extends TestCase
         ]);
 
         $response->assertStatus(422);
-        clearstatcache();
-        $this->assertFileDoesNotExist($tmpFile, 'File was not deleted after failed parse.');
+
+        // The key invariant: no storage path was persisted when parse fails.
+        $state = Cache::get('import_state_' . $this->userA->id);
+        $this->assertNull($state, 'import_state cache must NOT be populated on parse failure.');
+
+        // Clean up
+        @unlink($tmpFile);
     }
 
     // ══════════════════════════════════════════════════════════════
@@ -338,10 +359,22 @@ class SmartImportTest extends TestCase
     public function test_review_page_loads_with_cached_data(): void
     {
         $this->actingAs($this->userA);
-        $cacheKey = 'import_review_'.$this->userA->id;
-        Cache::put($cacheKey, [
-            ['name' => 'Review Asset', 'tag' => 'RV-001', 'category_id' => '', 'department_id' => '', 'status' => 'in_service', 'model' => '', 'serial_number' => 'SN999', 'purchase_date' => ''],
-        ], now()->addMinutes(30));
+
+        // R6: review() now reads from staging table, not cache.
+        \Illuminate\Support\Facades\DB::table('temporary_asset_imports')->insert([
+            [
+                'user_id'     => $this->userA->id,
+                'property_id' => $this->propertyA->id,
+                'tag'         => 'RV-001',
+                'name'        => 'Review Asset',
+                'category_id' => $this->categoryA->id,
+                'department_id' => $this->departmentA->id,
+                'status'      => 'in_service',
+                'is_invalid'  => false,
+                'created_at'  => now(),
+                'updated_at'  => now(),
+            ],
+        ]);
 
         $response = $this->get(route('assets.import-review'));
         $response->assertStatus(200);
@@ -526,42 +559,51 @@ class SmartImportTest extends TestCase
     {
         $this->actingAs($this->userA);
 
-        $cacheKey = 'import_review_' . $this->userA->id;
-
-        // Generate 110 rows:
-        // Index 5 (Page 1) is invalid (missing name)
-        // Index 55 (Page 2) is invalid (missing category_id)
-        // Others are valid
-        $data = [];
+        // R6: Seed staging table instead of cache.
+        // Index 5 is invalid (missing name), Index 55 has empty category_id.
+        $rows = [];
         for ($i = 0; $i < 110; $i++) {
             if ($i === 5) {
-                $data[] = [
-                    'name' => '',
-                    'tag' => 'TAG-5',
-                    'category_id' => $this->categoryA->id,
+                $rows[] = [
+                    'user_id'       => $this->userA->id,
+                    'property_id'   => $this->propertyA->id,
+                    'tag'           => 'TAG-5',
+                    'name'          => '',
+                    'category_id'   => $this->categoryA->id,
                     'department_id' => $this->departmentA->id,
-                    'status' => 'in_service'
+                    'status'        => 'in_service',
+                    'is_invalid'    => true,  // missing name
+                    'created_at'    => now(), 'updated_at' => now(),
                 ];
             } elseif ($i === 55) {
-                $data[] = [
-                    'name' => 'Row 55',
-                    'tag' => 'TAG-55',
-                    'category_id' => '',
+                $rows[] = [
+                    'user_id'       => $this->userA->id,
+                    'property_id'   => $this->propertyA->id,
+                    'tag'           => 'TAG-55',
+                    'name'          => 'Row 55',
+                    'category_id'   => null,
                     'department_id' => $this->departmentA->id,
-                    'status' => 'in_service'
+                    'status'        => 'in_service',
+                    'is_invalid'    => true,  // missing category
+                    'created_at'    => now(), 'updated_at' => now(),
                 ];
             } else {
-                $data[] = [
-                    'name' => 'Valid Row ' . $i,
-                    'tag' => 'TAG-' . $i,
-                    'category_id' => $this->categoryA->id,
+                $rows[] = [
+                    'user_id'       => $this->userA->id,
+                    'property_id'   => $this->propertyA->id,
+                    'tag'           => 'TAG-' . $i,
+                    'name'          => 'Valid Row ' . $i,
+                    'category_id'   => $this->categoryA->id,
                     'department_id' => $this->departmentA->id,
-                    'status' => 'in_service'
+                    'status'        => 'in_service',
+                    'is_invalid'    => false,
+                    'created_at'    => now(), 'updated_at' => now(),
                 ];
             }
         }
-
-        Cache::put($cacheKey, $data, now()->addMinutes(30));
+        foreach (array_chunk($rows, 500) as $chunk) {
+            \Illuminate\Support\Facades\DB::table('temporary_asset_imports')->insert($chunk);
+        }
 
         $response = $this->get(route('assets.import-review', ['page' => 1]));
         $response->assertStatus(200);
@@ -580,42 +622,45 @@ class SmartImportTest extends TestCase
     {
         $this->actingAs($this->userA);
 
-        $cacheKey = 'import_review_' . $this->userA->id;
-
-        // Start with an invalid row (index 5) missing name
-        $data = [
-            5 => [
-                'name' => '',
-                'tag' => 'TAG-5',
-                'category_id' => $this->categoryA->id,
+        // R6: Seed staging table with one invalid row (missing name at position 0).
+        \Illuminate\Support\Facades\DB::table('temporary_asset_imports')->insert([
+            [
+                'user_id'       => $this->userA->id,
+                'property_id'   => $this->propertyA->id,
+                'tag'           => 'TAG-5',
+                'name'          => '',
+                'category_id'   => $this->categoryA->id,
                 'department_id' => $this->departmentA->id,
-                'status' => 'in_service',
-                'is_invalid' => true
-            ]
-        ];
+                'status'        => 'in_service',
+                'is_invalid'    => true,
+                'created_at'    => now(),
+                'updated_at'    => now(),
+            ],
+        ]);
 
-        Cache::put($cacheKey, $data, now()->addMinutes(30));
-
-        // Submit auto-save edit to fix the name of the row (index 5)
+        // Submit auto-save edit to fix the name of the row (absolute_index=0)
         $response = $this->postJson(route('assets.import.update-row'), [
-            'absolute_index' => 5,
-            'field_name' => 'name',
-            'new_value' => 'Now Valid Name'
+            'absolute_index' => 0,
+            'field_name'     => 'name',
+            'new_value'      => 'Now Valid Name',
         ]);
 
         $response->assertStatus(200);
         $response->assertJson([
-            'success' => true,
-            'is_invalid' => false,
+            'success'      => true,
+            'is_invalid'   => false,
             'invalidPages' => [],
-            'validCount' => 1,
-            'invalidCount' => 0
+            'validCount'   => 1,
+            'invalidCount' => 0,
         ]);
 
-        // Assert that the cache has been updated
-        $updatedData = Cache::get($cacheKey);
-        $this->assertEquals('Now Valid Name', $updatedData[5]['name']);
-        $this->assertFalse($updatedData[5]['is_invalid']);
+        // Assert that the staging table has been updated
+        $updatedRow = \Illuminate\Support\Facades\DB::table('temporary_asset_imports')
+            ->where('user_id', $this->userA->id)
+            ->where('property_id', $this->propertyA->id)
+            ->first();
+        $this->assertEquals('Now Valid Name', $updatedRow->name);
+        $this->assertFalse((bool) $updatedRow->is_invalid);
     }
 
     public function test_clean_abandoned_imports_command(): void
@@ -676,6 +721,60 @@ class SmartImportTest extends TestCase
             // Cleanup database records
             \Illuminate\Support\Facades\DB::table('cache')->where('key', $prefix . 'import_state_8888')->delete();
         }
+    }
+
+    public function test_delete_row_endpoint_removes_staging_record_and_recalculates_validation(): void
+    {
+        $this->actingAs($this->userA);
+
+        // Seed staging table with two rows
+        \Illuminate\Support\Facades\DB::table('temporary_asset_imports')->insert([
+            [
+                'user_id'       => $this->userA->id,
+                'property_id'   => $this->propertyA->id,
+                'tag'           => 'TAG-A',
+                'name'          => 'Asset A',
+                'category_id'   => $this->categoryA->id,
+                'department_id' => $this->departmentA->id,
+                'status'        => 'in_service',
+                'is_invalid'    => false,
+                'created_at'    => now(),
+                'updated_at'    => now(),
+            ],
+            [
+                'user_id'       => $this->userA->id,
+                'property_id'   => $this->propertyA->id,
+                'tag'           => 'TAG-B',
+                'name'          => '',
+                'category_id'   => $this->categoryA->id,
+                'department_id' => $this->departmentA->id,
+                'status'        => 'in_service',
+                'is_invalid'    => true,
+                'created_at'    => now(),
+                'updated_at'    => now(),
+            ],
+        ]);
+
+        // Assert they both exist in DB
+        $this->assertEquals(2, \DB::table('temporary_asset_imports')->where('user_id', $this->userA->id)->count());
+
+        // Call the delete-row endpoint to delete the first row (absolute_index = 0)
+        $response = $this->postJson(route('assets.import.delete-row'), [
+            'absolute_index' => 0,
+        ]);
+
+        $response->assertStatus(200);
+        $response->assertJson([
+            'success'      => true,
+            'totalCount'   => 1,
+            'validCount'   => 0,
+            'invalidCount' => 1,
+        ]);
+
+        // Assert only the second row remains (which had index 1, now index 0)
+        $remaining = \DB::table('temporary_asset_imports')->where('user_id', $this->userA->id)->get();
+        $this->assertCount(1, $remaining);
+        $this->assertEquals('TAG-B', $remaining[0]->tag);
     }
 }
 

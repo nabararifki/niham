@@ -333,7 +333,7 @@
             </div>
 
             <!-- Item 2: Middle - Text -->
-            <div class="text-sm text-gray-600 dark:text-gray-300 mb-2" x-text="percentage + '% - Memproses ' + processed + ' dari ' + total + ' baris'"></div>
+            <div class="text-sm text-gray-600 dark:text-gray-300 mb-2" x-text="percentage + '% - ' + rowText"></div>
 
             <!-- Item 3: Middle - Bar -->
             <progress class="progress progress-primary w-full" :value="percentage" max="100"></progress>
@@ -631,7 +631,7 @@
                 pollTimeoutTimer: null,      // Safety timeout
                 title: '{{ __("assets.import_progress_title") }}',
                 subtitle: '{{ __("assets.import_progress_subtitle") }}',
-                rowText: '',
+                rowText: '{{ __("assets.import_row_counting") }}',
                 redirectUrl: '{{ route("assets.import-rapid-add") }}',
 
                 init() {

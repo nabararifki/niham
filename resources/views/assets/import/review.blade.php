@@ -26,7 +26,9 @@
         }
     </style>
 
-    <div class="py-8" x-data="importReview({ validCount: @json($validCount), invalidCount: @json($invalidCount), invalidPages: @json($invalidPages) })">
+    {{-- @js, not @json: these happen to be integers today, but @json emits literal
+         double quotes for any string value, which would terminate this attribute. --}}
+    <div class="py-8" x-data="importReview({ validCount: @js($validCount), invalidCount: @js($invalidCount), invalidPages: @js($invalidPages), total: @js($total) })">
         <div class="max-w-7xl mx-auto sm:px-6 lg:px-8 space-y-6">
 
             {{-- ─── Progress Stepper (Top) ─────────────────────────────────────── --}}
@@ -241,10 +243,10 @@
                                                        class="block w-40 border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:ring-accent focus:border-accent text-xs dark:bg-gray-900/50 dark:text-white" />
                                             </td>
 
-                                            {{-- Action (remove row from DOM only) --}}
+                                            {{-- Action (Delete row via AJAX, confirmed through delete_row_modal) --}}
                                             <td class="px-2 py-2.5 whitespace-nowrap text-center">
                                                 <button type="button"
-                                                        @click="$el.closest('tr').remove(); rows--;"
+                                                        @click="requestDeleteRow({{ $globalIndex }}, $data)"
                                                         class="text-red-500 hover:text-red-700 dark:hover:text-red-400 transition-colors p-1.5 bg-red-50 dark:bg-red-900/20 rounded-lg"
                                                         title="{{ __('assets.action') }}">
                                                     <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
@@ -292,7 +294,7 @@
                                 {{-- Row counter --}}
                                 <p class="text-sm font-medium text-gray-500 dark:text-gray-400">
                                     {{ __('assets.total_rows') }}
-                                    <span class="text-gray-900 dark:text-gray-100 font-semibold ml-1">{{ number_format($total) }}</span>
+                                    <span class="text-gray-900 dark:text-gray-100 font-semibold ml-1" x-text="Number(totalRows).toLocaleString()"></span>
                                 </p>
 
                                 {{-- Save All button (bottom) --}}
@@ -393,6 +395,7 @@
                 validCount: config.validCount || 0,
                 invalidCount: config.invalidCount || 0,
                 invalidPages: config.invalidPages || [],
+                totalRows: config.total || 0,
 
                 get validText() {
                     return @json(__('assets.preflight_valid_rows', ['count' => '__COUNT__'])).replace('__COUNT__', Number(this.validCount).toLocaleString());
@@ -400,6 +403,43 @@
 
                 get invalidText() {
                     return @json(__('assets.preflight_invalid_warning', ['count' => '__COUNT__'])).replace('__COUNT__', Number(this.invalidCount).toLocaleString());
+                },
+
+                async deleteRow(absoluteIndex, trScope) {
+                    if (confirm('Apakah Anda yakin ingin menghapus baris data ini?')) {
+                        try {
+                            const response = await fetch('{{ route("assets.import.delete-row") }}', {
+                                method: 'POST',
+                                headers: {
+                                    'Content-Type': 'application/json',
+                                    'X-CSRF-TOKEN': '{{ csrf_token() }}',
+                                    'X-Requested-With': 'XMLHttpRequest',
+                                    'Accept': 'application/json'
+                                },
+                                body: JSON.stringify({
+                                    absolute_index: absoluteIndex
+                                })
+                            });
+
+                            if (!response.ok) {
+                                throw new Error('Delete request failed');
+                            }
+
+                            const data = await response.json();
+                            if (data.success) {
+                                this.validCount = data.validCount;
+                                this.invalidCount = data.invalidCount;
+                                this.totalRows = data.totalCount;
+                                this.invalidPages = data.invalidPages;
+
+                                // Reload page so pagination and DOM indices align perfectly with database
+                                window.location.reload();
+                            }
+                        } catch (err) {
+                            console.error('Delete failed:', err);
+                            alert('Gagal menghapus baris: ' + err.message);
+                        }
+                    }
                 },
 
                 async autoSave(absoluteIndex, fieldName, newValue, trScope) {

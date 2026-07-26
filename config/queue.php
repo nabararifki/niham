@@ -35,11 +35,14 @@ return [
         ],
 
         'database' => [
-            'driver' => 'database',
-            'connection' => env('DB_QUEUE_CONNECTION'),
-            'table' => env('DB_QUEUE_TABLE', 'jobs'),
-            'queue' => env('DB_QUEUE', 'default'),
-            'retry_after' => (int) env('DB_QUEUE_RETRY_AFTER', 90),
+            'driver'       => 'database',
+            'connection'   => env('DB_QUEUE_CONNECTION'),
+            'table'        => env('DB_QUEUE_TABLE', 'jobs'),
+            'queue'        => env('DB_QUEUE', 'default'),
+            // Must exceed ProcessImportJob::$timeout (600 s). 660 = 600 + 60 s buffer.
+            // If lower than the job timeout the queue driver will re-queue a still-running
+            // job, causing duplicate inserts into the staging table.
+            'retry_after'  => (int) env('DB_QUEUE_RETRY_AFTER', 660),
             'after_commit' => true,
         ],
 

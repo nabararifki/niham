@@ -9,67 +9,45 @@ use Illuminate\Support\Facades\DB;
 
 class CleanAbandonedImports extends Command
 {
-    /**
-     * The name and signature of the console command.
-     *
-     * @var string
-     */
     protected $signature = 'app:clean-abandoned-imports';
 
-    /**
-     * The console command description.
-     *
-     * @var string
-     */
-    protected $description = 'Clean up abandoned temporary import files and their corresponding cache records.';
+    protected $description = 'Clean up abandoned temporary import files, cache records, and staging table rows.';
 
-    /**
-     * Execute the console command.
-     */
     public function handle(): int
     {
         $this->info('Starting clean up of abandoned imports...');
 
-        // 1. Clean up temporary files older than 60 minutes
         $this->cleanTempFiles();
-
-        // 2. Clean up expired import cache entries
         $this->cleanExpiredCaches();
+        $this->cleanStagingRows();
 
         $this->info('Clean up completed successfully.');
-
         return self::SUCCESS;
     }
 
-    /**
-     * Scan the local disk temp folder and delete files older than 60 minutes.
-     */
     protected function cleanTempFiles(): void
     {
         $disk = Storage::disk('local');
-        
         if (! $disk->exists('temp')) {
             $this->info('No temp folder found on local storage disk.');
             return;
         }
 
-        $files = $disk->files('temp');
-        $now = time();
-        $threshold = 60 * 60; // 60 minutes
+        $files        = $disk->files('temp');
+        $now          = time();
+        $threshold    = 60 * 60; // 60 minutes
         $deletedCount = 0;
 
         foreach ($files as $file) {
             try {
                 $lastModified = $disk->lastModified($file);
-                $age = $now - $lastModified;
-
+                $age          = $now - $lastModified;
                 if ($age > $threshold) {
                     $disk->delete($file);
                     $deletedCount++;
                     $this->line("Deleted old temp file: {$file} (Age: " . round($age / 60) . " mins)");
                 }
             } catch (\Throwable $e) {
-                // Log and print error but keep processing other files
                 Log::error("Failed to delete temp import file: {$file}. Error: " . $e->getMessage());
                 $this->error("Error deleting {$file}: {$e->getMessage()}");
             }
@@ -78,17 +56,12 @@ class CleanAbandonedImports extends Command
         $this->info("Cleaned up {$deletedCount} abandoned temporary import file(s).");
     }
 
-    /**
-     * Clean up expired import cache keys from the database store.
-     */
     protected function cleanExpiredCaches(): void
     {
         $defaultStore = config('cache.default');
-
         if ($defaultStore === 'database') {
-            $prefix = config('cache.prefix');
+            $prefix    = config('cache.prefix');
             $tableName = config('cache.stores.database.table', 'cache');
-
             try {
                 $deletedCount = DB::table($tableName)
                     ->where(function ($query) use ($prefix) {
@@ -98,7 +71,6 @@ class CleanAbandonedImports extends Command
                     })
                     ->where('expiration', '<', now()->timestamp)
                     ->delete();
-
                 $this->info("Cleaned up {$deletedCount} expired import cache record(s) from database cache table.");
             } catch (\Throwable $e) {
                 Log::error("Failed to clean up expired import cache entries. Error: " . $e->getMessage());
@@ -106,6 +78,27 @@ class CleanAbandonedImports extends Command
             }
         } else {
             $this->line("Cache driver is set to '{$defaultStore}'. Automatic pruning of expired entries is handled by the cache driver natively.");
+        }
+    }
+
+    /**
+     * Remove staging rows older than 60 minutes.
+     *
+     * Rows that old are considered abandoned — the user navigated away,
+     * the job failed, or the browser was closed before storeBatch() ran.
+     * Prevents unbounded growth of the temporary_asset_imports table.
+     */
+    protected function cleanStagingRows(): void
+    {
+        try {
+            $threshold    = now()->subMinutes(60);
+            $deletedCount = DB::table('temporary_asset_imports')
+                ->where('created_at', '<', $threshold)
+                ->delete();
+            $this->info("Cleaned up {$deletedCount} orphaned staging row(s) from temporary_asset_imports.");
+        } catch (\Throwable $e) {
+            Log::error("Failed to clean up orphaned staging rows. Error: " . $e->getMessage());
+            $this->error("Error cleaning staging table: {$e->getMessage()}");
         }
     }
 }

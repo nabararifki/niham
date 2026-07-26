@@ -163,11 +163,16 @@ class AssetImportController extends Controller
     }
 
     /**
-     * Process the manual mapping submitted by user.
-     * Dispatches a queued job for async streaming; returns JSON for frontend polling.
+     * Validate the user's column mapping and dispatch the background import job.
+     *
+     * Validates path ownership to prevent path-traversal attacks, then dispatches
+     * ProcessImportJob which streams rows into the staging table in 500-row chunks.
+     * Returns a JSON response; the frontend polls /import/status for progress.
      */
     public function processMapping(Request $request)
     {
+        $this->authorize('create', \App\Models\Asset::class);
+
         $request->validate([
             'payload' => 'required|string',
         ]);
@@ -197,6 +202,26 @@ class AssetImportController extends Controller
 
         $tempFilePath = $payload['temp_file_path'];
 
+        // Guard against path-traversal: only allow paths matching the exact
+        // format produced by parse() — prefix "temp/import_", hex uniqid, known extension.
+        if (!preg_match('/^temp\/import_[a-f0-9]+\.(csv|xlsx)$/', $tempFilePath)) {
+            return response()->json([
+                'success' => false,
+                'message' => __('assets.import_parse_error', ['message' => 'Invalid file path format.']),
+            ], 422);
+        }
+
+        // Cross-check ownership: the submitted path must exactly match the one
+        // stored by parse() in this user's own import_state cache entry.
+        // Prevents one user from hijacking another user's temp file.
+        $sessionState = Cache::get('import_state_' . auth()->id());
+        if (!$sessionState || ($sessionState['temp_file_path'] ?? '') !== $tempFilePath) {
+            return response()->json([
+                'success' => false,
+                'message' => __('assets.import_parse_error', ['message' => 'File path does not match your current import session.']),
+            ], 403);
+        }
+
         if (!Storage::disk('local')->exists($tempFilePath)) {
             return response()->json([
                 'success' => false,
@@ -218,6 +243,25 @@ class AssetImportController extends Controller
         }
 
         $selectedSheet = $payload['selected_sheet'] ?? 0;
+
+        // Resolve the tenant property. Super-admins target the session-selected
+        // property; regular users are scoped to their own assigned property.
+        // We persist property_id back into the session cache so the background
+        // worker can read it without needing the HTTP session.
+        $propertyId = auth()->user()->isSuperAdmin()
+            ? session('active_property_id')
+            : auth()->user()->property_id;
+
+        if (!$propertyId) {
+            return response()->json([
+                'success' => false,
+                'message' => __('assets.import_parse_error', ['message' => 'No active property selected. Please select a property before importing.']),
+            ], 422);
+        }
+
+        $importState = Cache::get('import_state_' . auth()->id(), []);
+        $importState['property_id'] = $propertyId;
+        Cache::put('import_state_' . auth()->id(), $importState, 1800);
 
         // Seed initial progress cache (all keys present for frontend)
         $progressKey = 'import_progress_' . auth()->id();
@@ -280,109 +324,115 @@ class AssetImportController extends Controller
     }
 
     /**
-     * Rapid Add interception: cross-reference category/department hints
-     * against the database. If missing, proceed to rapid-add workflow.
+     * Intercept post-import flow to handle unknown category/department names.
+     *
+     * The import job stores raw text hints (_category_hint, _department_hint)
+     * for values it could not resolve to existing IDs. This method reads those
+     * hints from the staging table, matches them against the database, updates
+     * staging rows with the resolved IDs, and — if any names are still missing
+     * — renders the rapid-add form for the user to create them on the fly.
      */
     public function rapidAdd(Request $request)
     {
-        $cacheKey = 'import_review_'.auth()->id();
-        $data = Cache::get($cacheKey);
+        // Super-admin targets the session-selected property; regular users use their own.
+        $propertyId = auth()->user()->isSuperAdmin()
+            ? session('active_property_id')
+            : auth()->user()->property_id;
 
-        if ($data === null) {
+        if (!$propertyId) {
+            return redirect()->route('assets.index')
+                ->with('warning', __('assets.import_parse_error', ['message' => 'No active property selected.']));
+        }
+
+        $userId   = auth()->id();
+        $stagingQ = \DB::table('temporary_asset_imports')
+            ->where('user_id', $userId)
+            ->where('property_id', $propertyId);
+
+        if ($stagingQ->doesntExist()) {
             return redirect()->route('assets.index')
                 ->with('warning', __('assets.import_parse_error', ['message' => 'Import session expired or not found.']));
         }
 
-        // 1. Extract unique hints from the cached data
-        $categoryHints = collect($data)
-            ->pluck('_category_hint')
-            ->map(fn($v) => trim($v))
-            ->filter()
-            ->unique()
-            ->values()
-            ->toArray();
+        // 1. Extract unique hints from the staging table
+        $categoryHints = $stagingQ->clone()
+            ->whereNotNull('_category_hint')
+            ->where('_category_hint', '<>', '')
+            ->distinct()->pluck('_category_hint')
+            ->map(fn($v) => trim($v))->filter()->unique()->values()->toArray();
 
-        $departmentHints = collect($data)
-            ->pluck('_department_hint')
-            ->map(fn($v) => trim($v))
-            ->filter()
-            ->unique()
-            ->values()
-            ->toArray();
+        $departmentHints = $stagingQ->clone()
+            ->whereNotNull('_department_hint')
+            ->where('_department_hint', '<>', '')
+            ->distinct()->pluck('_department_hint')
+            ->map(fn($v) => trim($v))->filter()->unique()->values()->toArray();
 
-        // 2. Query existing names case-insensitively
-        // Using LOWER() for PostgreSQL compatibility to match hints effectively
-        $existingCategories = Category::whereIn(\DB::raw('LOWER(name)'), array_map('strtolower', $categoryHints))
-            ->pluck('name')
-            ->toArray();
+        // Case-insensitive look-up against entities that already exist in this property.
+        $existingCategories = Category::where('property_id', $propertyId)
+            ->whereIn(\DB::raw('LOWER(name)'), array_map('strtolower', $categoryHints))
+            ->pluck('name')->toArray();
 
-        $existingDepartments = Department::whereIn(\DB::raw('LOWER(name)'), array_map('strtolower', $departmentHints))
-            ->pluck('name')
-            ->toArray();
+        $existingDepartments = Department::where('property_id', $propertyId)
+            ->whereIn(\DB::raw('LOWER(name)'), array_map('strtolower', $departmentHints))
+            ->pluck('name')->toArray();
 
-        // 3. Find missing items (case-insensitive difference)
-        $missingCategories = array_values(array_udiff($categoryHints, $existingCategories, 'strcasecmp'));
+        $missingCategories  = array_values(array_udiff($categoryHints, $existingCategories, 'strcasecmp'));
         $missingDepartments = array_values(array_udiff($departmentHints, $existingDepartments, 'strcasecmp'));
 
-        $warnings = [];
+        $warnings             = [];
         $hasMissingCategories = !empty($missingCategories);
         $hasMissingDepartments = !empty($missingDepartments);
 
-        // Check category auth
+        // If the user lacks permission to create categories, clear the unresolved hints
+        // from staging rows so those rows won't be blocked at storeBatch time.
         if ($hasMissingCategories && !auth()->user()->can('create', Category::class)) {
             $warnings[] = __('assets.import_unauthorized_category_add', ['count' => count($missingCategories)]);
-            // Strip missing category hints
-            foreach ($data as &$row) {
-                $hint = trim($row['_category_hint']);
-                $isMissing = collect($missingCategories)->contains(fn($c) => strcasecmp($c, $hint) === 0);
-                if ($isMissing) {
-                    $row['_category_hint'] = '';
-                }
+            foreach ($missingCategories as $missingCat) {
+                \DB::table('temporary_asset_imports')
+                    ->where('user_id', $userId)->where('property_id', $propertyId)
+                    ->whereRaw('LOWER(_category_hint) = ?', [strtolower($missingCat)])
+                    ->update(['_category_hint' => '']);
             }
             $missingCategories = [];
         }
 
-        // Check department auth
         if ($hasMissingDepartments && !auth()->user()->can('create', Department::class)) {
             $warnings[] = __('assets.import_unauthorized_department_add', ['count' => count($missingDepartments)]);
-            // Strip missing department hints
-            foreach ($data as &$row) {
-                $hint = trim($row['_department_hint']);
-                $isMissing = collect($missingDepartments)->contains(fn($c) => strcasecmp($c, $hint) === 0);
-                if ($isMissing) {
-                    $row['_department_hint'] = '';
-                }
+            foreach ($missingDepartments as $missingDept) {
+                \DB::table('temporary_asset_imports')
+                    ->where('user_id', $userId)->where('property_id', $propertyId)
+                    ->whereRaw('LOWER(_department_hint) = ?', [strtolower($missingDept)])
+                    ->update(['_department_hint' => '']);
             }
             $missingDepartments = [];
         }
 
-        // --- MAP EXISTING ENTITIES IMMEDIATELY ---
-        // Fetch full collections of existing models matching names case-insensitively
-        $existingCatModels = Category::whereIn(\DB::raw('LOWER(name)'), array_map('strtolower', $categoryHints))->get();
-        $existingDeptModels = Department::whereIn(\DB::raw('LOWER(name)'), array_map('strtolower', $departmentHints))->get();
+        // Eagerly resolve existing entities and write their IDs into the staging rows
+        // so that storeBatch() does not need to re-resolve them later.
+        $existingCatModels  = Category::where('property_id', $propertyId)
+            ->whereIn(\DB::raw('LOWER(name)'), array_map('strtolower', $categoryHints))->get();
+        $existingDeptModels = Department::where('property_id', $propertyId)
+            ->whereIn(\DB::raw('LOWER(name)'), array_map('strtolower', $departmentHints))->get();
 
-        foreach ($data as &$row) {
-            $cHint = trim($row['_category_hint']);
-            $dHint = trim($row['_department_hint']);
-
-            if (!empty($cHint)) {
-                $matched = $existingCatModels->first(fn($c) => strcasecmp($c->name, $cHint) === 0);
-                if ($matched) {
-                    $row['category_id'] = $matched->id;
-                }
-            }
-
-            if (!empty($dHint)) {
-                $matched = $existingDeptModels->first(fn($d) => strcasecmp($d->name, $dHint) === 0);
-                if ($matched) {
-                    $row['department_id'] = $matched->id;
-                }
-            }
+        foreach ($existingCatModels as $cat) {
+            \DB::table('temporary_asset_imports')
+                ->where('user_id', $userId)->where('property_id', $propertyId)
+                ->whereRaw('LOWER(_category_hint) = ?', [strtolower($cat->name)])
+                ->update(['category_id' => $cat->id]);
         }
-        // -----------------------------------------
+        foreach ($existingDeptModels as $dept) {
+            \DB::table('temporary_asset_imports')
+                ->where('user_id', $userId)->where('property_id', $propertyId)
+                ->whereRaw('LOWER(_department_hint) = ?', [strtolower($dept->name)])
+                ->update(['department_id' => $dept->id]);
+        }
 
-        // Re-cache data with mapped existing IDs (and potentially stripped unauthorized hints)
-        Cache::put($cacheKey, $data, now()->addMinutes(30));
+        // Recalculate is_invalid for all staging rows after entity mapping
+        \DB::table('temporary_asset_imports')
+            ->where('user_id', $userId)->where('property_id', $propertyId)
+            ->update([
+                'is_invalid' => \DB::raw("(name = '' OR name IS NULL OR category_id IS NULL)"),
+            ]);
 
         // If none are missing (or were stripped), bypass and go to standard review
         if (empty($missingCategories) && empty($missingDepartments)) {
@@ -397,147 +447,169 @@ class AssetImportController extends Controller
     }
 
     /**
-     * Process Rapid Add submissions.
+     * Persist the categories/departments created via the Rapid-Add form,
+     * then write their new IDs back into the matching staging table rows.
+     *
+     * After this method, every staging row with a valid name + category_id
+     * is flagged as is_invalid = false and ready for storeBatch().
      */
     public function storeRapidAdd(Request $request, EntityCodeGeneratorService $codeGen)
     {
         $request->validate([
-            'categories' => 'nullable|array',
-            'categories.*' => 'string|max:255',
-            'departments' => 'nullable|array',
+            'categories'    => 'nullable|array',
+            'categories.*'  => 'string|max:255',
+            'departments'   => 'nullable|array',
             'departments.*' => 'string|max:255',
         ]);
 
-        $cacheKey = 'import_review_'.auth()->id();
-        $data = Cache::get($cacheKey);
+        $propertyId = auth()->user()->isSuperAdmin()
+            ? session('active_property_id')
+            : auth()->user()->property_id;
 
-        if ($data === null) {
+        if (!$propertyId) {
+            return redirect()->route('assets.index')
+                ->with('warning', __('assets.import_parse_error', ['message' => 'No active property selected.']));
+        }
+
+        $userId = auth()->id();
+
+        $stagingExists = \DB::table('temporary_asset_imports')
+            ->where('user_id', $userId)
+            ->where('property_id', $propertyId)
+            ->exists();
+
+        if (!$stagingExists) {
             return redirect()->route('assets.index')
                 ->with('warning', __('assets.import_parse_error', ['message' => 'Import session expired or not found.']));
         }
 
-        $propertyId = auth()->user()->isSuperAdmin() ? session('active_property_id') : auth()->user()->property_id;
-
-        $createdCategories = [];
+        $createdCategories  = [];
         $createdDepartments = [];
 
-        // Create Categories
         if ($request->filled('categories') && auth()->user()->can('create', Category::class)) {
             foreach ($request->categories as $name) {
-                $code = $codeGen->generateUniqueCode($name, Category::class, $propertyId);
+                $code     = $codeGen->generateUniqueCode($name, Category::class, $propertyId);
                 $category = Category::create([
-                    'name' => $name,
-                    'code' => $code,
+                    'name'        => $name,
+                    'code'        => $code,
                     'property_id' => $propertyId,
                 ]);
                 $createdCategories[$name] = $category->id;
             }
         }
 
-        // Create Departments
         if ($request->filled('departments') && auth()->user()->can('create', Department::class)) {
             foreach ($request->departments as $name) {
-                $code = $codeGen->generateUniqueCode($name, Department::class, $propertyId);
+                $code       = $codeGen->generateUniqueCode($name, Department::class, $propertyId);
                 $department = Department::create([
-                    'name' => $name,
-                    'code' => $code,
+                    'name'        => $name,
+                    'code'        => $code,
                     'property_id' => $propertyId,
                 ]);
                 $createdDepartments[$name] = $department->id;
             }
         }
 
-        // Map the IDs back
-        foreach ($data as &$row) {
-            $catHint = trim($row['_category_hint']);
-            $deptHint = trim($row['_department_hint']);
-
-            $matchedCat = collect($createdCategories)->first(function ($id, $name) use ($catHint) {
-                return strcasecmp($name, $catHint) === 0;
-            });
-            if ($matchedCat) {
-                $row['category_id'] = $matchedCat;
-                $row['_category_hint'] = '';
-            }
-
-            $matchedDept = collect($createdDepartments)->first(function ($id, $name) use ($deptHint) {
-                return strcasecmp($name, $deptHint) === 0;
-            });
-            if ($matchedDept) {
-                $row['department_id'] = $matchedDept;
-                $row['_department_hint'] = '';
-            }
+        // Write the freshly-created IDs back into the staging rows that referenced
+        // these names as hints, then clear the hint column so the row is resolved.
+        foreach ($createdCategories as $name => $catId) {
+            \DB::table('temporary_asset_imports')
+                ->where('user_id', $userId)
+                ->where('property_id', $propertyId)
+                ->whereRaw('LOWER(_category_hint) = ?', [strtolower($name)])
+                ->update(['category_id' => $catId, '_category_hint' => '']);
         }
 
-        // Re-cache updated data
-        Cache::put($cacheKey, $data, now()->addMinutes(30));
+        foreach ($createdDepartments as $name => $deptId) {
+            \DB::table('temporary_asset_imports')
+                ->where('user_id', $userId)
+                ->where('property_id', $propertyId)
+                ->whereRaw('LOWER(_department_hint) = ?', [strtolower($name)])
+                ->update(['department_id' => $deptId, '_department_hint' => '']);
+        }
+
+        // Re-evaluate validity for all rows in a single SQL UPDATE now that IDs are resolved.
+        \DB::table('temporary_asset_imports')
+            ->where('user_id', $userId)
+            ->where('property_id', $propertyId)
+            ->update([
+                'is_invalid' => \DB::raw("(name = '' OR name IS NULL OR category_id IS NULL)"),
+            ]);
 
         return redirect()->route('assets.import-review');
     }
 
     /**
-     * Review page: paginate the cached array with LengthAwarePaginator.
+     * Render the import review page with paginated staging rows.
      *
-     * Only the current page slice (50 rows) is passed to the view,
-     * preventing OOM crashes on 100K-row imports.
-     * Categories and departments are fetched ONCE and keyed into
-     * associative maps — eliminating N+1 queries inside the Blade loop.
+     * Reads directly from the staging table (50 rows per page), so only the
+     * current page slice is held in PHP memory regardless of import size.
+     * Categories and departments are pre-fetched once per request and keyed
+     * by ID to avoid N+1 queries inside the Blade loop.
+     * Computes the set of page numbers that contain invalid rows so the
+     * pagination UI can show a visual warning indicator ("heatmap").
      */
     public function review(Request $request)
     {
-        $cacheKey = 'import_review_' . auth()->id();
-        $allData  = Cache::get($cacheKey);
-        $warning  = null;
+        $propertyId = auth()->user()->isSuperAdmin()
+            ? session('active_property_id')
+            : auth()->user()->property_id;
 
-        if ($allData === null) {
+        if (!$propertyId) {
+            return redirect()->route('assets.index')
+                ->with('warning', __('assets.import_parse_error', ['message' => 'No active property selected.']));
+        }
+
+        $userId   = auth()->id();
+        $warning  = null;
+        $perPage  = 50;
+
+        $stagingBase = \DB::table('temporary_asset_imports')
+            ->where('user_id', $userId)
+            ->where('property_id', $propertyId);
+
+        $total = $stagingBase->clone()->count();
+
+        if ($total === 0) {
             return redirect()->route('assets.index')
                 ->with('warning', __('assets.import_parse_error', ['message' => 'Import session expired or not found.']));
         }
 
-        if (empty($allData)) {
-            $allData = array_fill(0, 5, [
-                'tag'           => '',
-                'name'          => '',
-                'category_id'   => '',
-                'department_id' => '',
-                'status'        => 'in_service',
-                'model'         => '',
-                'serial_number' => '',
-                'purchase_date' => '',
-                'purchase_cost' => '',
-                'remarks'       => '',
-            ]);
-            $warning = __('assets.no_data_found');
-        }
+        $validCount   = $stagingBase->clone()->where('is_invalid', false)
+            ->where(function ($q) { $q->whereNotNull('name')->where('name', '<>', ''); })
+            ->count();
+        $invalidCount = $total - $validCount;
 
-        // Loop through cached array to calculate valid and invalid counts
-        $validCount = 0;
-        $invalidCount = 0;
+        // Compute which page numbers contain invalid rows (for pagination heatmap)
+        $invalidRows = $stagingBase->clone()
+            ->where('is_invalid', true)
+            ->orderBy('id')
+            ->select('id')
+            ->get();
+
+        // Map row positions to page numbers using row_number equivalent
+        $allIds     = $stagingBase->clone()->orderBy('id')->pluck('id')->toArray();
+        $idToPosition = array_flip($allIds); // id => 0-based position
         $invalidPages = [];
-        $perPage     = 50;
-        foreach ($allData as $index => &$item) {
-            $isEmpty = empty($item['name']) && empty($item['tag']) && empty($item['category_id']) && empty($item['department_id']);
-            if ($isEmpty) {
-                continue;
-            }
-            if (empty($item['name']) || empty($item['category_id'])) {
-                $invalidCount++;
-                $item['is_invalid'] = true;
-                $pageNumber = (int) ceil(($index + 1) / $perPage);
-                if (!in_array($pageNumber, $invalidPages)) {
-                    $invalidPages[] = $pageNumber;
+        foreach ($invalidRows as $row) {
+            $pos  = $idToPosition[$row->id] ?? null;
+            if ($pos !== null) {
+                $page = (int) ceil(($pos + 1) / $perPage);
+                if (!in_array($page, $invalidPages)) {
+                    $invalidPages[] = $page;
                 }
-            } else {
-                $validCount++;
-                $item['is_invalid'] = false;
             }
         }
-        unset($item);
 
-        // ── Paginate the cached array (50 rows per page) ─────────────────────
+        // ── Paginate directly from DB ─────────────────────────────────
         $currentPage = LengthAwarePaginator::resolveCurrentPage();
-        $total       = count($allData);
-        $pageItems   = array_slice($allData, ($currentPage - 1) * $perPage, $perPage);
+        $pageItems   = $stagingBase->clone()
+            ->orderBy('id')
+            ->offset(($currentPage - 1) * $perPage)
+            ->limit($perPage)
+            ->get()
+            ->map(fn($row) => (array) $row)
+            ->toArray();
 
         $paginatedData = new LengthAwarePaginator(
             $pageItems,
@@ -547,16 +619,13 @@ class AssetImportController extends Controller
             ['path' => $request->url(), 'query' => $request->query()]
         );
 
-        // ── Pre-fetch entity maps (1 query each, keyed by ID) ─────────────────
-        // This eliminates N+1 queries: no DB is touched inside the Blade loop.
-        $categories    = Category::orderBy('name')->get();
-        $departments   = Department::orderBy('name')->get();
-        $categoriesMap = $categories->keyBy('id');   // id => Category model
-        $departmentsMap = $departments->keyBy('id'); // id => Department model
+        // Pre-fetch all categories and departments for this property once,
+        // then pass keyed maps to the view to avoid per-row DB calls.
+        $categories     = Category::where('property_id', $propertyId)->orderBy('name')->get();
+        $departments    = Department::where('property_id', $propertyId)->orderBy('name')->get();
+        $categoriesMap  = $categories->keyBy('id');
+        $departmentsMap = $departments->keyBy('id');
 
-        // Compute the global 0-based offset for the first row of this page
-        // so that form input names (assets[N][...]) are globally unique
-        // across pages and the store() can process submitted edits correctly.
         $pageOffset = ($currentPage - 1) * $perPage;
 
         return view('assets.import.review', compact(
@@ -585,19 +654,12 @@ class AssetImportController extends Controller
             'purchase_cost' => '', 'remarks' => '',
         ]);
 
-        // Calculate counts for manual entry (initially completely empty)
-        $validCount = 0;
-        $invalidCount = 0;
+        $validCount = 0; $invalidCount = 0;
         foreach ($allData as $item) {
             $isEmpty = empty($item['name']) && empty($item['tag']) && empty($item['category_id']) && empty($item['department_id']);
-            if ($isEmpty) {
-                continue;
-            }
-            if (empty($item['name']) || empty($item['category_id'])) {
-                $invalidCount++;
-            } else {
-                $validCount++;
-            }
+            if ($isEmpty) continue;
+            if (empty($item['name']) || empty($item['category_id'])) $invalidCount++;
+            else $validCount++;
         }
 
         $perPage       = 50;
@@ -607,8 +669,18 @@ class AssetImportController extends Controller
             $allData, $total, $perPage, $currentPage,
             ['path' => $request->url(), 'query' => $request->query()]
         );
-        $categories     = Category::orderBy('name')->get();
-        $departments    = Department::orderBy('name')->get();
+
+        // Load entity lists scoped to the active property for the form dropdowns.
+        $propertyId = auth()->user()->isSuperAdmin()
+            ? session('active_property_id')
+            : auth()->user()->property_id;
+
+        $categories     = $propertyId
+            ? Category::where('property_id', $propertyId)->orderBy('name')->get()
+            : collect();
+        $departments    = $propertyId
+            ? Department::where('property_id', $propertyId)->orderBy('name')->get()
+            : collect();
         $categoriesMap  = $categories->keyBy('id');
         $departmentsMap = $departments->keyBy('id');
         $warning        = null;
@@ -623,84 +695,68 @@ class AssetImportController extends Controller
     }
 
     /**
-     * Final DB insertion — reads from cache, not form payload.
+     * Insert assets submitted from the manual bulk-entry form (not from staging).
      *
-     * Because the review page is paginated, the HTML form only contains
-     * the current page's rows. Reading from the cache guarantees we insert
-     * ALL rows regardless of which page the user was on when they submitted.
-     * Row-level edits on the current page are merged back before insertion.
+     * This path is used when the user fills out the manual 5-row form rather than
+     * uploading a file. The submitted rows are validated and inserted directly;
+     * category/department IDs are cross-checked against the active property to
+     * prevent cross-tenant FK violations.
      */
     public function store(Request $request)
     {
-        $cacheKey = 'import_review_' . auth()->id();
-        $allData  = Cache::get($cacheKey);
+        $this->authorize('create', \App\Models\Asset::class);
 
-        // Fallback: manual bulk entry has no cache, use form data directly
-        if ($allData === null) {
-            $request->validate([
-                'assets' => 'required|array',
-                'assets.*.name' => 'required|string|max:255',
-                'assets.*.tag' => 'required|string|max:64',
-                'assets.*.category_id' => 'required|exists:categories,id',
-                'assets.*.department_id' => 'required|exists:departments,id',
-                'assets.*.status' => 'required|in:in_service,out_of_service,disposed',
-            ]);
-            $allData = collect($request->input('assets', []))->values()->toArray();
-            if (empty($allData)) {
-                return redirect()->route('assets.index')
-                    ->with('warning', __('assets.import_parse_error', ['message' => 'Import session expired or not found.']));
-            }
-        } else {
-            // Merge current-page form edits back into the cached dataset
-            $formAssets = $request->input('assets', []);
-            $pageOffset = (int) $request->input('page_offset', 0);
-            foreach ($formAssets as $localIdx => $formRow) {
-                $globalIdx = $pageOffset + (int) $localIdx;
-                if (isset($allData[$globalIdx])) {
-                    $allData[$globalIdx] = array_merge($allData[$globalIdx], $formRow);
-                }
-            }
-        }
+        // Manual bulk entry path: no staging rows exist — read from form directly
+        $request->validate([
+            'assets'                => 'required|array',
+            'assets.*.name'         => 'required|string|max:255',
+            'assets.*.tag'          => 'required|string|max:64',
+            'assets.*.category_id'  => 'required|integer',
+            'assets.*.department_id'=> 'nullable|integer',
+            'assets.*.status'       => 'required|in:in_service,out_of_service,disposed',
+        ]);
 
-        $editorId = auth()->id();
-
-        // Filter valid data to perform graceful partial import
-        $validData = [];
-        foreach ($allData as $item) {
-            $isEmpty = empty($item['name']) && empty($item['tag']) && empty($item['category_id']) && empty($item['department_id']);
-            if ($isEmpty) {
-                continue;
-            }
-            // Skip invalid rows violating PostgreSQL NOT NULL constraints
-            if (empty($item['name']) || empty($item['category_id'])) {
-                continue;
-            }
-            $validData[] = $item;
-        }
-
+        $editorId   = auth()->id();
         $propertyId = auth()->user()->isSuperAdmin()
             ? session('active_property_id')
             : auth()->user()->property_id;
 
+        abort_if(!$propertyId, 403, 'No active property selected.');
+
+        // Build lookup sets of valid FK IDs for this property; rows referencing
+        // IDs outside these sets are skipped rather than causing a DB error.
+        $validCategoryIds   = Category::where('property_id', $propertyId)->pluck('id')->flip();
+        $validDepartmentIds = Department::where('property_id', $propertyId)->pluck('id')->flip();
+
+        $allData    = collect($request->input('assets', []))->values()->toArray();
         $insertRows = [];
-        foreach ($validData as $item) {
-            $tag = !empty($item['tag']) ? $item['tag'] : ('AST-' . strtoupper(substr(uniqid(), -6)));
+        foreach ($allData as $item) {
+            $isEmpty = empty($item['name']) && empty($item['tag']) && empty($item['category_id']);
+            if ($isEmpty) continue;
+            if (empty($item['name']) || empty($item['category_id'])) continue;
+
+            $catId  = (int) $item['category_id'];
+            $deptId = !empty($item['department_id']) ? (int) $item['department_id'] : null;
+
+            // Skip rows referencing a category or department from another property.
+            if (!isset($validCategoryIds[$catId])) continue;
+            if ($deptId && !isset($validDepartmentIds[$deptId])) $deptId = null;
+
+            $tag     = !empty($item['tag']) ? $item['tag'] : ('AST-' . strtoupper(substr(uniqid(), -6)));
             $remarks = !empty($item['remarks'])
                 ? $item['remarks']
                 : (!empty($item['model']) ? 'Imported. Model: ' . $item['model'] : 'Imported.');
-            if (strlen($remarks) > 120) {
-                $remarks = substr($remarks, 0, 117) . '...';
-            }
+            if (strlen($remarks) > 120) $remarks = substr($remarks, 0, 117) . '...';
 
             $insertRows[] = [
                 'uuid'          => (string) \Illuminate\Support\Str::orderedUuid(),
-                'name'          => $item['name'] ?? '',
+                'name'          => $item['name'],
                 'tag'           => $tag,
-                'category_id'   => !empty($item['category_id']) ? (int) $item['category_id'] : null,
-                'department_id' => !empty($item['department_id']) ? (int) $item['department_id'] : null,
+                'category_id'   => $catId,
+                'department_id' => $deptId,
                 'status'        => $item['status'] ?? 'in_service',
                 'serial_number' => $item['serial_number'] ?? null,
-                'purchase_date' => !empty($item['purchase_date']) ? $item['purchase_date'] : null,
+                'purchase_date' => $this->sanitizeDate($item['purchase_date'] ?? null),
                 'purchase_cost' => is_numeric($item['purchase_cost'] ?? '') ? $item['purchase_cost'] : null,
                 'remarks'       => $remarks,
                 'editor'        => $editorId,
@@ -719,251 +775,423 @@ class AssetImportController extends Controller
         } catch (\Exception $e) {
             \DB::rollBack();
             Log::error('Bulk Insert Failed: ' . $e->getMessage());
-
             return back()->withInput()->withErrors(['error' => 'Failed to save assets. ' . $e->getMessage()]);
         }
 
-        // Clean both cache keys after successful import
-        Cache::forget($cacheKey);
+        // Clear session cache entries left over from the parse/mapping phase.
         Cache::forget('import_state_' . auth()->id());
+        Cache::forget('import_review_' . auth()->id()); // legacy key, kept for safety
 
         return redirect()->route('assets.index')->with('ok', __('assets.import_success'));
     }
 
     /**
-     * AJAX: Calculate validation counts based on latest cache and form edits.
+     * AJAX: Return live validation counts for the review page footer.
+     *
+     * Called by the frontend on page load and after storeBatch() completes
+     * to keep the valid/invalid counters in sync. Falls back to counting
+     * from the submitted form payload when no staging rows exist (manual entry).
      */
     public function calculateValidation(Request $request)
     {
-        $cacheKey = 'import_review_' . auth()->id();
-        $allData  = Cache::get($cacheKey);
+        $propertyId = auth()->user()->isSuperAdmin()
+            ? session('active_property_id')
+            : auth()->user()->property_id;
 
-        if ($allData === null) {
-            // Fallback for manual bulk entry or expired cache
-            $allData = collect($request->input('assets', []))->values()->toArray();
-        } else {
-            // Merge current-page form edits back into the cached dataset
-            $formAssets = $request->input('assets', []);
-            $pageOffset = (int) $request->input('page_offset', 0);
-            foreach ($formAssets as $localIdx => $formRow) {
-                $globalIdx = $pageOffset + (int) $localIdx;
-                if (isset($allData[$globalIdx])) {
-                    $allData[$globalIdx] = array_merge($allData[$globalIdx], $formRow);
-                }
+        // Fallback for manual bulk entry (no staging rows)
+        if (!$propertyId || !\DB::table('temporary_asset_imports')
+                ->where('user_id', auth()->id())
+                ->where('property_id', $propertyId)
+                ->exists()) {
+            // Manual bulk entry path: count from submitted form data
+            $formAssets   = $request->input('assets', []);
+            $validCount   = 0;
+            $invalidCount = 0;
+            foreach ($formAssets as $item) {
+                $isEmpty = empty($item['name']) && empty($item['tag']) && empty($item['category_id']);
+                if ($isEmpty) continue;
+                if (empty($item['name']) || empty($item['category_id'])) $invalidCount++;
+                else $validCount++;
             }
-            // Save the merged data back to cache to sync it
-            Cache::put($cacheKey, $allData, now()->addMinutes(30));
+            return response()->json(['success' => true, 'validCount' => $validCount, 'invalidCount' => $invalidCount]);
         }
 
-        $validCount = 0;
-        $invalidCount = 0;
+        $q            = \DB::table('temporary_asset_imports')
+            ->where('user_id', auth()->id())->where('property_id', $propertyId);
+        $total        = $q->clone()->count();
+        $validCount   = $q->clone()->where('is_invalid', false)
+            ->where(function ($q) { $q->whereNotNull('name')->where('name', '<>', ''); })->count();
+        $invalidCount = $total - $validCount;
 
-        foreach ($allData as $item) {
-            $isEmpty = empty($item['name']) && empty($item['tag']) && empty($item['category_id']) && empty($item['department_id']);
-            if ($isEmpty) {
-                continue;
-            }
-            if (empty($item['name']) || empty($item['category_id'])) {
-                $invalidCount++;
-            } else {
-                $validCount++;
-            }
-        }
-
-        return response()->json([
-            'success' => true,
-            'validCount' => $validCount,
-            'invalidCount' => $invalidCount,
-        ]);
+        return response()->json(['success' => true, 'validCount' => $validCount, 'invalidCount' => $invalidCount]);
     }
 
     /**
-     * AJAX: Auto-save modifications to a single cell/field within the review cache.
+     * AJAX: Persist a single cell edit from the review table into the staging row.
+     *
+     * The review page sends edits as they happen (auto-save). This method
+     * locates the staging row by its 0-based insert order, applies the update,
+     * recalculates the row's is_invalid flag, and returns updated global
+     * counts + heatmap page list so the frontend can refresh without a reload.
+     *
+     * The field_name input is validated against a whitelist before being used
+     * as a column name to prevent SQL injection.
      */
     public function updateSingleRow(Request $request)
     {
         $request->validate([
             'absolute_index' => 'required|integer|min:0',
-            'field_name' => 'required|string',
-            'new_value' => 'nullable|string',
+            'field_name'     => 'required|string',
+            'new_value'      => 'nullable|string',
         ]);
 
-        $absoluteIndex = (int) $request->input('absolute_index');
         $fieldName = $request->input('field_name');
-        $newValue = $request->input('new_value');
+        $newValue  = $request->input('new_value');
 
         // Normalize field_name if it comes as "assets[x][field]"
         if (preg_match('/^assets\[\d+\]\[(.+)\]$/', $fieldName, $matches)) {
             $fieldName = $matches[1];
         }
 
-        $cacheKey = 'import_review_' . auth()->id();
-        $allData = Cache::get($cacheKey);
-
-        if ($allData === null || !isset($allData[$absoluteIndex])) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Cache session expired or index not found.',
-            ], 422);
+        // Whitelist of columns the user is permitted to edit via the review UI.
+        $allowedFields = ['tag', 'name', 'category_id', 'department_id', 'status',
+                          'model', 'serial_number', 'purchase_date', 'purchase_cost', 'remarks'];
+        if (!in_array($fieldName, $allowedFields, true)) {
+            return response()->json(['success' => false, 'message' => 'Invalid field name.'], 422);
         }
 
-        // Apply mutation
-        $item = $allData[$absoluteIndex];
-        $item[$fieldName] = $newValue;
+        $userId     = auth()->id();
+        $propertyId = auth()->user()->isSuperAdmin()
+            ? session('active_property_id')
+            : auth()->user()->property_id;
 
-        // Recalculate is_invalid flag for this specific row based on NOT NULL constraints
-        $isEmpty = empty($item['name']) && empty($item['tag']) && empty($item['category_id']) && empty($item['department_id']);
-        if ($isEmpty) {
-            $item['is_invalid'] = false;
-        } else {
-            if (empty($item['name']) || empty($item['category_id'])) {
-                $item['is_invalid'] = true;
-            } else {
-                $item['is_invalid'] = false;
+        if (!$propertyId) {
+            return response()->json(['success' => false, 'message' => 'No active property.'], 403);
+        }
+
+        // For FK fields, confirm the submitted ID exists within the active property
+        // before writing it — prevents assigning an entity from another tenant.
+        if (in_array($fieldName, ['category_id', 'department_id']) && !empty($newValue)) {
+            $table  = $fieldName === 'category_id' ? 'categories' : 'departments';
+            $exists = \DB::table($table)
+                ->where('id', (int) $newValue)
+                ->where('property_id', $propertyId)
+                ->exists();
+            if (!$exists) {
+                return response()->json(['success' => false, 'message' => 'Invalid entity for this property.'], 422);
             }
         }
-        $allData[$absoluteIndex] = $item;
 
-        // Save entire array back to Cache
-        Cache::put($cacheKey, $allData, now()->addMinutes(30));
+        // Locate the staging row by its 0-based insertion order (ORDER BY id OFFSET n).
+        $absoluteIndex = (int) $request->input('absolute_index');
+        $stagingRow    = \DB::table('temporary_asset_imports')
+            ->where('user_id', $userId)
+            ->where('property_id', $propertyId)
+            ->orderBy('id')
+            ->skip($absoluteIndex)
+            ->first();
 
-        // Recalculate invalid pages and count totals
-        $validCount = 0;
-        $invalidCount = 0;
+        if (!$stagingRow) {
+            return response()->json(['success' => false, 'message' => 'Row not found.'], 422);
+        }
+
+        // Update the specific column
+        $updateValue = ($fieldName === 'category_id' || $fieldName === 'department_id')
+            ? (!empty($newValue) ? (int) $newValue : null)
+            : $newValue;
+
+        \DB::table('temporary_asset_imports')
+            ->where('id', $stagingRow->id)
+            ->where('user_id', $userId)
+            ->where('property_id', $propertyId)
+            ->update([
+                $fieldName   => $updateValue,
+                'updated_at' => now(),
+            ]);
+
+        // Recalculate is_invalid for this row
+        $updatedRow  = \DB::table('temporary_asset_imports')->find($stagingRow->id);
+        $isEmpty     = empty($updatedRow->name) && empty($updatedRow->tag);
+        $isInvalid   = $isEmpty ? false : (empty($updatedRow->name) || empty($updatedRow->category_id));
+
+        \DB::table('temporary_asset_imports')
+            ->where('id', $stagingRow->id)
+            ->update(['is_invalid' => $isInvalid, 'updated_at' => now()]);
+
+        // ── Recalculate global stats from DB (no full array needed) ────────
+        $baseQ        = \DB::table('temporary_asset_imports')
+            ->where('user_id', $userId)->where('property_id', $propertyId);
+        $totalCount   = $baseQ->clone()->count();
+        $validCount   = $baseQ->clone()->where('is_invalid', false)
+            ->where(function ($q) { $q->whereNotNull('name')->where('name', '<>', ''); })->count();
+        $invalidCount = $totalCount - $validCount;
+
+        $perPage      = 50;
+        $allIds       = $baseQ->clone()->orderBy('id')->pluck('id')->toArray();
+        $invalidIds   = $baseQ->clone()->where('is_invalid', true)->orderBy('id')->pluck('id')->toArray();
+        $idToPosition = array_flip($allIds);
         $invalidPages = [];
-        $perPage = 50;
-
-        foreach ($allData as $index => $row) {
-            $rowEmpty = empty($row['name']) && empty($row['tag']) && empty($row['category_id']) && empty($row['department_id']);
-            if ($rowEmpty) {
-                continue;
-            }
-            if (empty($row['name']) || empty($row['category_id'])) {
-                $invalidCount++;
-                $pageNumber = (int) ceil(($index + 1) / $perPage);
-                if (!in_array($pageNumber, $invalidPages)) {
-                    $invalidPages[] = $pageNumber;
-                }
-            } else {
-                $validCount++;
+        foreach ($invalidIds as $iId) {
+            $pos  = $idToPosition[$iId] ?? null;
+            if ($pos !== null) {
+                $page = (int) ceil(($pos + 1) / $perPage);
+                if (!in_array($page, $invalidPages)) $invalidPages[] = $page;
             }
         }
 
         return response()->json([
-            'success' => true,
-            'is_invalid' => (bool) ($item['is_invalid'] ?? false),
+            'success'      => true,
+            'is_invalid'   => $isInvalid,
             'invalidPages' => $invalidPages,
-            'validCount' => $validCount,
+            'validCount'   => $validCount,
             'invalidCount' => $invalidCount,
         ]);
     }
 
     /**
-     * AJAX: Synchronously save a batch of assets to prevent timeouts.
+     * AJAX: Move a slice of valid staging rows into the assets table.
+     *
+     * The frontend calls this in chunks (offset + limit) so the browser
+     * shows a progress bar for very large imports. Each call is protected
+     * by an atomic cache lock keyed to (user, offset) to prevent a duplicate
+     * request from inserting the same rows twice (e.g., double-click, retry).
+     *
+     * On the final chunk: sends a notification, then purges all staging rows
+     * for this user+property session.
      */
     public function storeBatch(Request $request)
     {
+        $this->authorize('create', \App\Models\Asset::class);
+
         $offset = (int) $request->input('offset', 0);
-        $limit = (int) $request->input('limit', 500);
+        $limit  = (int) $request->input('limit', 500);
 
-        $cacheKey = 'import_review_' . auth()->id();
-        $allData = Cache::get($cacheKey);
+        $userId     = auth()->id();
+        $propertyId = auth()->user()->isSuperAdmin()
+            ? session('active_property_id')
+            : auth()->user()->property_id;
 
-        if ($allData === null) {
+        abort_if(!$propertyId, 403, 'No active property selected.');
+
+        // Atomic lock per (user, offset) — if the same chunk arrives twice
+        // (network retry, double-submit), the second request exits immediately.
+        $lockKey = 'import_store_lock_' . $userId . '_' . $offset;
+        $lock    = Cache::lock($lockKey, 30);
+
+        if (!$lock->get()) {
             return response()->json([
                 'success' => false,
-                'message' => __('assets.import_parse_error', ['message' => 'Import session expired or not found.']),
-            ], 422);
+                'message' => 'Duplicate request detected. Please wait.',
+            ], 409);
         }
 
-        // Filter valid data to perform graceful partial import
-        $validRows = [];
-        foreach ($allData as $item) {
-            $isEmpty = empty($item['name']) && empty($item['tag']) && empty($item['category_id']) && empty($item['department_id']);
-            if ($isEmpty) {
-                continue;
+        try {
+            $stagingBase = \DB::table('temporary_asset_imports')
+                ->where('user_id', $userId)
+                ->where('property_id', $propertyId)
+                ->where('is_invalid', false)
+                ->whereNotNull('name')->where('name', '<>', '');
+
+            $totalValid = $stagingBase->clone()->count();
+
+            if ($totalValid === 0) {
+                return response()->json(['success' => true, 'processed_count' => 0, 'is_completed' => true]);
             }
-            if (empty($item['name']) || empty($item['category_id'])) {
-                continue;
+
+            // Build allowlists of valid FK IDs for this property. Staging rows
+            // that reference an ID outside these sets are silently skipped.
+            $validCategoryIds   = Category::where('property_id', $propertyId)->pluck('id')->toArray();
+            $validDepartmentIds = Department::where('property_id', $propertyId)->pluck('id')->toArray();
+
+            // Fetch the batch slice of valid staging rows
+            $rows = $stagingBase->clone()
+                ->orderBy('id')
+                ->skip($offset)->limit($limit)
+                ->get();
+
+            $editorId   = $userId;
+            $insertRows = [];
+            $now        = now();
+
+            foreach ($rows as $row) {
+                $catId  = in_array($row->category_id, $validCategoryIds)   ? (int) $row->category_id  : null;
+                $deptId = in_array($row->department_id, $validDepartmentIds) ? (int) $row->department_id : null;
+
+                if (!$catId) continue; // category_id is required — skip rows with cross-tenant FK
+
+                $tag     = !empty($row->tag) ? $row->tag : ('AST-' . strtoupper(substr(uniqid(), -6)));
+                $remarks = !empty($row->remarks)
+                    ? $row->remarks
+                    : (!empty($row->model) ? 'Imported. Model: ' . $row->model : 'Imported.');
+                if (strlen($remarks) > 120) $remarks = substr($remarks, 0, 117) . '...';
+
+                $insertRows[] = [
+                    'uuid'          => (string) \Illuminate\Support\Str::orderedUuid(),
+                    'name'          => $row->name,
+                    'tag'           => $tag,
+                    'category_id'   => $catId,
+                    'department_id' => $deptId,
+                    'status'        => $row->status ?? 'in_service',
+                    'serial_number' => $row->serial_number ?: null,
+                    'purchase_date' => $this->sanitizeDate($row->purchase_date),
+                    'purchase_cost' => is_numeric($row->purchase_cost ?? '') ? $row->purchase_cost : null,
+                    'remarks'       => $remarks,
+                    'editor'        => $editorId,
+                    'property_id'   => $propertyId,
+                    'created_at'    => $now,
+                    'updated_at'    => $now,
+                ];
             }
-            $validRows[] = $item;
+
+            $processedCount = count($insertRows);
+
+            if (!empty($insertRows)) {
+                \DB::beginTransaction();
+                try {
+                    \DB::table('assets')->insert($insertRows);
+                    \DB::commit();
+                } catch (\Exception $e) {
+                    \DB::rollBack();
+                    Log::error('Batch Insert Failed: ' . $e->getMessage());
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'Failed to save assets batch. ' . $e->getMessage(),
+                    ], 500);
+                }
+            }
+
+            $isCompleted = ($offset + $limit) >= $totalValid;
+
+            if ($isCompleted) {
+                if ($totalValid > 0) {
+                    auth()->user()->notify(new \App\Notifications\BulkImportSuccessfulNotification($totalValid));
+                }
+                // Purge staging rows and session cache entries for this import.
+                \DB::table('temporary_asset_imports')
+                    ->where('user_id', $userId)
+                    ->where('property_id', $propertyId)
+                    ->delete();
+                Cache::forget('import_state_' . $userId);
+                Cache::forget('import_review_' . $userId); // legacy key, kept for safety
+            }
+
+            return response()->json([
+                'success'         => true,
+                'processed_count' => $processedCount,
+                'is_completed'    => $isCompleted,
+            ]);
+
+        } finally {
+            $lock->release();
+        }
+    }
+
+    /**
+     * Sanitize a raw date string from a spreadsheet into a Y-m-d value or null.
+     *
+     * Spreadsheets often contain placeholder text such as "N/A", "-", "?", or
+     * locale-specific formats that PostgreSQL cannot cast to the date type.
+     * This method tries several common formats and returns null for anything
+     * that cannot be parsed as a real date, preventing INSERT errors.
+     */
+    private function sanitizeDate(mixed $value): ?string
+    {
+        if (empty($value) || !is_string($value)) {
+            return null;
         }
 
-        $totalValid = count($validRows);
-        $chunk = array_slice($validRows, $offset, $limit);
-        $processedCount = count($chunk);
+        $value = trim($value);
 
-        $editorId = auth()->id();
-        $propertyId = null;
-        if (auth()->check()) {
-            $user = auth()->user();
-            if ($user->isSuperAdmin()) {
-                $propertyId = session('active_property_id');
-            } else {
-                $propertyId = $user->property_id;
+        if ($value === '' || $value === '-' || $value === 'N/A' || $value === '?' || $value === '0') {
+            return null;
+        }
+
+        // Try multiple common date formats from spreadsheets
+        $formats = ['Y-m-d', 'd/m/Y', 'm/d/Y', 'd-m-Y', 'Y/m/d', 'd.m.Y', 'j/n/Y', 'n/j/Y'];
+        foreach ($formats as $format) {
+            $dt = \DateTime::createFromFormat($format, $value);
+            if ($dt && $dt->format($format) === $value) {
+                return $dt->format('Y-m-d');
             }
         }
 
-        $insertRows = [];
-        foreach ($chunk as $item) {
-            $tag = !empty($item['tag']) ? $item['tag'] : ('AST-' . strtoupper(substr(uniqid(), -6)));
-            
-            $remarks = !empty($item['remarks'])
-                ? $item['remarks']
-                : (!empty($item['model']) ? 'Imported. Model: ' . $item['model'] : 'Imported.');
-            if (strlen($remarks) > 120) {
-                $remarks = substr($remarks, 0, 117) . '...';
-            }
-
-            $insertRows[] = [
-                'uuid'          => (string) \Illuminate\Support\Str::orderedUuid(),
-                'name'          => $item['name'] ?? '',
-                'tag'           => $tag,
-                'category_id'   => !empty($item['category_id']) ? (int) $item['category_id'] : null,
-                'department_id' => !empty($item['department_id']) ? (int) $item['department_id'] : null,
-                'status'        => $item['status'] ?? 'in_service',
-                'serial_number' => $item['serial_number'] ?? null,
-                'purchase_date' => !empty($item['purchase_date']) ? $item['purchase_date'] : null,
-                'purchase_cost' => is_numeric($item['purchase_cost'] ?? '') ? $item['purchase_cost'] : null,
-                'remarks'       => $remarks,
-                'editor'        => $editorId,
-                'property_id'   => $propertyId,
-                'created_at'    => now(),
-                'updated_at'    => now(),
-            ];
+        // Last resort: PHP's strtotime for natural-language dates
+        $ts = strtotime($value);
+        if ($ts !== false && $ts > 0) {
+            return date('Y-m-d', $ts);
         }
 
-        if (!empty($insertRows)) {
-            \DB::beginTransaction();
-            try {
-                \DB::table('assets')->insert($insertRows);
-                \DB::commit();
-            } catch (\Exception $e) {
-                \DB::rollBack();
-                Log::error('Batch Insert Failed: ' . $e->getMessage());
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Failed to save assets batch. ' . $e->getMessage(),
-                ], 500);
-            }
+        return null;
+    }
+
+    /**
+     * AJAX: Delete a single staging row from temporary_asset_imports database table.
+     */
+    public function deleteRow(Request $request)
+    {
+        $request->validate([
+            'absolute_index' => 'required|integer|min:0',
+        ]);
+
+        $userId     = auth()->id();
+        $propertyId = auth()->user()->isSuperAdmin()
+            ? session('active_property_id')
+            : auth()->user()->property_id;
+
+        if (!$propertyId) {
+            return response()->json(['success' => false, 'message' => 'No active property.'], 403);
         }
 
-        $isCompleted = ($offset + $limit) >= $totalValid;
+        $absoluteIndex = (int) $request->input('absolute_index');
+        $stagingRow    = \DB::table('temporary_asset_imports')
+            ->where('user_id', $userId)
+            ->where('property_id', $propertyId)
+            ->orderBy('id')
+            ->skip($absoluteIndex)
+            ->first();
 
-        if ($isCompleted) {
-            if ($totalValid > 0) {
-                auth()->user()->notify(new \App\Notifications\BulkImportSuccessfulNotification($totalValid));
+        if (!$stagingRow) {
+            return response()->json(['success' => false, 'message' => 'Row not found.'], 422);
+        }
+
+        \DB::table('temporary_asset_imports')
+            ->where('id', $stagingRow->id)
+            ->where('user_id', $userId)
+            ->where('property_id', $propertyId)
+            ->delete();
+
+        // Recalculate global stats from DB using efficient count aggregation
+        $baseQ        = \DB::table('temporary_asset_imports')
+            ->where('user_id', $userId)->where('property_id', $propertyId);
+        $totalCount   = $baseQ->clone()->count();
+        $validCount   = $baseQ->clone()->where('is_invalid', false)
+            ->where(function ($q) { $q->whereNotNull('name')->where('name', '<>', ''); })->count();
+        $invalidCount = $totalCount - $validCount;
+
+        $perPage      = 50;
+        $allIds       = $baseQ->clone()->orderBy('id')->pluck('id')->toArray();
+        $invalidIds   = $baseQ->clone()->where('is_invalid', true)->orderBy('id')->pluck('id')->toArray();
+        $idToPosition = array_flip($allIds);
+        $invalidPages = [];
+        foreach ($invalidIds as $iId) {
+            $pos  = $idToPosition[$iId] ?? null;
+            if ($pos !== null) {
+                $page = (int) ceil(($pos + 1) / $perPage);
+                if (!in_array($page, $invalidPages)) {
+                    $invalidPages[] = $page;
+                }
             }
-            Cache::forget($cacheKey);
-            Cache::forget('import_state_' . auth()->id());
         }
 
         return response()->json([
-            'success'         => true,
-            'processed_count' => $processedCount,
-            'is_completed'    => $isCompleted,
+            'success'      => true,
+            'totalCount'   => $totalCount,
+            'invalidPages' => $invalidPages,
+            'validCount'   => $validCount,
+            'invalidCount' => $invalidCount,
         ]);
     }
+
 
     /**
      * Cancel/Abort the ongoing import job.
@@ -971,7 +1199,7 @@ class AssetImportController extends Controller
     public function cancel(Request $request)
     {
         $userId = auth()->id();
-        
+
         // Signal cancellation in cache (background job will self-destruct)
         Cache::put('import_progress_' . $userId, ['status' => 'cancelled'], 300);
 
@@ -982,5 +1210,3 @@ class AssetImportController extends Controller
         return response()->json(['success' => true]);
     }
 }
-
-

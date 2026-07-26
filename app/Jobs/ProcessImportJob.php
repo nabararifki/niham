@@ -10,6 +10,7 @@ use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Facades\DB;
 use App\Models\User;
 
 class ProcessImportJob implements ShouldQueue
@@ -29,7 +30,7 @@ class ProcessImportJob implements ShouldQueue
     /**
      * Progress update interval (rows).
      */
-    private const BATCH_SIZE = 100;
+    private const BATCH_SIZE = 500;
 
     /**
      * Cache TTL for progress tracking (seconds).
@@ -100,8 +101,6 @@ class ProcessImportJob implements ShouldQueue
         } finally {
             // Cleanup temp file safely (use Storage so path is consistent)
             try {
-                // If the job was cancelled, do NOT delete the temporary file yet,
-                // because the user wants to return to the mapping page and re-submit it!
                 $currentProgress = Cache::get($this->progressKey());
                 $isCancelled = ($currentProgress && ($currentProgress['status'] ?? '') === 'cancelled');
 
@@ -112,8 +111,6 @@ class ProcessImportJob implements ShouldQueue
                 Log::warning('Failed to cleanup temp file: ' . $cleanupErr->getMessage());
             }
 
-            // SAFETY NET: If somehow neither 'completed', 'failed', nor 'cancelled' was set,
-            // ensure the frontend is never left polling forever.
             $currentProgress = Cache::get($this->progressKey());
             if ($currentProgress && !in_array($currentProgress['status'] ?? '', ['completed', 'failed', 'cancelled'])) {
                 Log::warning('ProcessImportJob ended without terminal status. Forcing failed.', [
@@ -132,50 +129,57 @@ class ProcessImportJob implements ShouldQueue
     }
 
     /**
-     * Core streaming logic: reads via OpenSpout, maps columns, reports progress.
+     * Core streaming logic: reads via OpenSpout, maps columns, streams to DB.
      */
     private function processFile(): void
     {
-        // Resolve the absolute path from the Storage-relative path
         if (!Storage::disk('local')->exists($this->tempFilePath)) {
             throw new \RuntimeException('Temporary import file not found: ' . $this->tempFilePath);
         }
         $fullPath  = Storage::disk('local')->path($this->tempFilePath);
         $extension = strtolower(pathinfo($fullPath, PATHINFO_EXTENSION));
 
-        // ── Resolve user + policies ───────────────────────────────────────
-        $user = User::with('department')->findOrFail($this->userId);
+        $user        = User::with('department')->findOrFail($this->userId);
         $isExecutive = $user->hasExecutiveOversight();
 
-        // ── Retrieve import state (true_header from peek phase) ───────────
-        $importState    = Cache::get('import_state_' . $this->userId) ?? [];
+        // ── Resolve property_id for tenant isolation in the staging table ─
+        $importState = Cache::get('import_state_' . $this->userId) ?? [];
+        $propertyId  = $user->isSuperAdmin()
+            ? ($importState['property_id'] ?? $user->activePropertyId())
+            : $user->property_id;
+
+        if (!$propertyId) {
+            throw new \RuntimeException('Cannot resolve property_id for user ' . $this->userId . '. Import aborted.');
+        }
+
         $expectedHeader = $importState['true_header'] ?? [];
+        $mapping        = $this->mappingPayload['mapping'] ?? [];
 
-        // ── Mapping payload from frontend ─────────────────────────────────
-        $mapping = $this->mappingPayload['mapping'] ?? [];
-
-        // ── Phase 1: Count total rows for progress denominator ────────────
-        $totalRows = $this->countDataRows($fullPath, $extension, $expectedHeader);
-        $this->setProgress('processing', 0, $totalRows);
-
-        // ── Phase 2: Stream and process ──────────────────────────────────
-        $options = $extension === 'csv'
-            ? new \OpenSpout\Reader\CSV\Options()
-            : new \OpenSpout\Reader\XLSX\Options();
-        $reader = $extension === 'csv'
-            ? new \OpenSpout\Reader\CSV\Reader($options)
-            : new \OpenSpout\Reader\XLSX\Reader($options);
+        $options = $extension === 'csv' ? new \OpenSpout\Reader\CSV\Options() : new \OpenSpout\Reader\XLSX\Options();
+        $reader  = $extension === 'csv' ? new \OpenSpout\Reader\CSV\Reader($options) : new \OpenSpout\Reader\XLSX\Reader($options);
 
         $reader->open($fullPath);
 
-        $results       = [];
         $header        = null;
         $processedRows = 0;
         $sheetIndex    = 0;
         $targetSheet   = is_numeric($this->selectedSheet) ? (int) $this->selectedSheet : 0;
+        $resultsChunk  = [];
+        $now           = now()->toDateTimeString();
+
+        // Clear any existing staging rows for this user+property session
+        DB::table('temporary_asset_imports')
+            ->where('user_id', $this->userId)
+            ->where('property_id', $propertyId)
+            ->delete();
+
+        // Pre-count data rows with a lightweight pass (no mapping, no DB writes)
+        // so the progress bar can show a meaningful percentage.
+        $totalRows = $this->countDataRows($fullPath, $extension, $targetSheet, $expectedHeader);
+
+        $this->setProgress('processing', 0, $totalRows);
 
         foreach ($reader->getSheetIterator() as $sheet) {
-            // Navigate to the user-selected sheet
             if ($sheetIndex !== $targetSheet) {
                 $sheetIndex++;
                 continue;
@@ -187,7 +191,6 @@ class ProcessImportJob implements ShouldQueue
                     return is_string($val) ? trim($val) : (string) $val;
                 }, $row->toArray());
 
-                // ── Robust Header Detection ──────────────────────────
                 if ($header === null) {
                     if (!empty($expectedHeader) && count(array_intersect($cells, $expectedHeader)) >= 2) {
                         $header = $cells;
@@ -197,14 +200,12 @@ class ProcessImportJob implements ShouldQueue
                         $header = $cells;
                         continue;
                     }
-                    continue; // Skip pre-header rows
+                    continue;
                 }
 
-                // ── Column combiner (respects user-defined separators) ──
                 $getCombined = function (string $fieldId) use ($mapping, $header, $cells): string {
                     $mapInfo = $mapping[$fieldId] ?? null;
                     if (!$mapInfo || empty($mapInfo['columns'])) return '';
-
                     $vals = [];
                     foreach ($mapInfo['columns'] as $colName) {
                         $colIdx = array_search($colName, $header);
@@ -215,7 +216,6 @@ class ProcessImportJob implements ShouldQueue
                     return implode($mapInfo['separator'] ?? ' ', $vals);
                 };
 
-                // ── Status normalization ─────────────────────────────
                 $statusRaw = strtolower($getCombined('status'));
                 if (preg_match('/(aktif|active|in.?service|baik|good|bagus)/i', $statusRaw)) {
                     $status = 'in_service';
@@ -227,68 +227,83 @@ class ProcessImportJob implements ShouldQueue
                     $status = 'in_service';
                 }
 
-                // ── Build mapped row (hasExecutiveOversight policy) ───
-                $mappedRow = [
-                    'tag'              => $getCombined('tag'),
-                    'name'             => $getCombined('name'),
-                    'category_id'      => '',
-                    'department_id'    => !$isExecutive ? $user->department_id : '',
+                $tag  = $getCombined('tag');
+                $name = $getCombined('name');
+
+                // Skip completely empty rows
+                if ($tag === '' && $name === '' && $getCombined('category') === '' && $getCombined('serial_number') === '') {
+                    continue;
+                }
+
+                $isEmpty   = empty($name) && empty($tag);
+                $isInvalid = $isEmpty ? false : (empty($name));
+
+                $resultsChunk[] = [
+                    'user_id'          => $this->userId,
+                    'property_id'      => $propertyId,
+                    'tag'              => $tag,
+                    'name'             => $name,
+                    'category_id'      => null,
+                    'department_id'    => !$isExecutive ? $user->department_id : null,
                     'status'           => $status,
                     'model'            => $getCombined('model'),
                     'serial_number'    => $getCombined('serial_number'),
-                    'purchase_date'    => $getCombined('purchase_date'),
-                    'purchase_cost'    => $getCombined('purchase_cost'),
+                    'purchase_date'    => $this->sanitizeDate($getCombined('purchase_date')),
+                    'purchase_cost'    => $getCombined('purchase_cost') ?: null,
                     'remarks'          => $getCombined('remarks'),
                     '_category_hint'   => $getCombined('category'),
                     '_department_hint' => !$isExecutive ? '' : $getCombined('department'),
+                    'is_invalid'       => $isInvalid,
+                    'created_at'       => $now,
+                    'updated_at'       => $now,
                 ];
-
-                // Skip completely empty rows
-                if (trim(implode('', array_values($mappedRow))) !== '') {
-                    $results[] = $mappedRow;
-                }
 
                 $processedRows++;
 
-                // ── Progress checkpoint every BATCH_SIZE rows ────────
-                if ($processedRows % self::BATCH_SIZE === 0) {
+                if (count($resultsChunk) >= self::BATCH_SIZE) {
+                    DB::table('temporary_asset_imports')->insert($resultsChunk);
+                    $resultsChunk = [];
+
+                    // Cancellation check
                     $currentStatus = Cache::get('import_progress_' . $this->userId);
                     if (isset($currentStatus['status']) && $currentStatus['status'] === 'cancelled') {
-                        return; // Exits processFile() gracefully, skipping review caching and completed status
+                        return;
                     }
                     $this->setProgress('processing', $processedRows, $totalRows);
                 }
             }
+            break;
+        }
 
-            break; // Process only the selected sheet
+        if (!empty($resultsChunk)) {
+            DB::table('temporary_asset_imports')->insert($resultsChunk);
         }
 
         $reader->close();
-
-        // ── Final: store results and force-mark completed ────────────────
-        // This runs OUTSIDE the loop, guaranteeing it fires even for 0-row or
-        // sub-BATCH_SIZE files (e.g. 15 rows < 500 batch threshold).
-        Cache::put('import_review_' . $this->userId, $results, 1800);
 
         Cache::put($this->progressKey(), [
             'status'     => 'completed',
             'percentage' => 100,
             'processed'  => $processedRows,
-            'total'      => $totalRows,
+            'total'      => $processedRows,
             'error'      => '',
         ], self::CACHE_TTL);
 
         Log::info('ProcessImportJob completed.', [
-            'user_id' => $this->userId,
-            'rows'    => $processedRows,
+            'user_id'     => $this->userId,
+            'rows'        => $processedRows,
+            'property_id' => $propertyId,
         ]);
     }
 
     /**
-     * Count data rows (excluding header and pre-header rows) for accurate progress.
-     * Uses a fast streaming pass without storing cell data.
+     * Quickly count data rows in the target sheet without performing any mapping or DB work.
+     *
+     * Opens a separate reader instance, skips the header row, and counts non-empty rows.
+     * This is a lightweight pass (no regex, no transformation) used only to establish
+     * the total for the progress bar.
      */
-    private function countDataRows(string $fullPath, string $extension, array $expectedHeader): int
+    private function countDataRows(string $fullPath, string $extension, int $targetSheet, array $expectedHeader): int
     {
         $options = $extension === 'csv'
             ? new \OpenSpout\Reader\CSV\Options()
@@ -302,7 +317,6 @@ class ProcessImportJob implements ShouldQueue
         $count       = 0;
         $headerFound = false;
         $sheetIndex  = 0;
-        $targetSheet = is_numeric($this->selectedSheet) ? (int) $this->selectedSheet : 0;
 
         foreach ($reader->getSheetIterator() as $sheet) {
             if ($sheetIndex !== $targetSheet) {
@@ -311,23 +325,24 @@ class ProcessImportJob implements ShouldQueue
             }
 
             foreach ($sheet->getRowIterator() as $row) {
-                if (!$headerFound) {
-                    $cells = array_map(function ($val) {
-                        if ($val instanceof \DateTimeInterface) return $val->format('Y-m-d');
-                        return is_string($val) ? trim($val) : (string) $val;
-                    }, $row->toArray());
+                $cells = array_map(fn($v) => is_string($v) ? trim($v) : (string) $v, $row->toArray());
 
-                    if (!empty($expectedHeader) && count(array_intersect($cells, $expectedHeader)) >= 2) {
+                if (!$headerFound) {
+                    $nonEmpty = count(array_filter($cells));
+                    $overlap  = !empty($expectedHeader)
+                        ? count(array_intersect($cells, $expectedHeader))
+                        : $nonEmpty;
+
+                    if ($overlap >= 2 || ($nonEmpty >= 2 && empty($expectedHeader))) {
                         $headerFound = true;
-                        continue;
-                    }
-                    if (empty($expectedHeader) && count(array_filter($cells)) >= 2) {
-                        $headerFound = true;
-                        continue;
                     }
                     continue;
                 }
-                $count++;
+
+                // Count rows that have at least one non-empty cell
+                if (count(array_filter($cells)) > 0) {
+                    $count++;
+                }
             }
             break;
         }
@@ -335,4 +350,5 @@ class ProcessImportJob implements ShouldQueue
         $reader->close();
         return $count;
     }
+
 }
