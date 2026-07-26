@@ -7,6 +7,7 @@ use App\Models\Category;
 use App\Models\Department;
 use App\Services\AssetImportService;
 use App\Services\EntityCodeGeneratorService;
+use App\Traits\SanitizesImportDates;
 use Illuminate\Http\Request;
 use Illuminate\Pagination\LengthAwarePaginator;
 use Illuminate\Support\Facades\Cache;
@@ -15,6 +16,8 @@ use Illuminate\Support\Facades\Storage;
 
 class AssetImportController extends Controller
 {
+    use SanitizesImportDates;
+
     private AssetImportService $importService;
 
     public function __construct(AssetImportService $importService)
@@ -644,153 +647,20 @@ class AssetImportController extends Controller
     }
 
     /**
-     * Manual bulk entry page: 5 blank rows.
-     */
-    public function bulkManual(Request $request)
-    {
-        $allData = array_fill(0, 5, [
-            'tag' => '', 'name' => '', 'category_id' => '', 'department_id' => '',
-            'status' => 'in_service', 'model' => '', 'serial_number' => '', 'purchase_date' => '',
-            'purchase_cost' => '', 'remarks' => '',
-        ]);
-
-        $validCount = 0; $invalidCount = 0;
-        foreach ($allData as $item) {
-            $isEmpty = empty($item['name']) && empty($item['tag']) && empty($item['category_id']) && empty($item['department_id']);
-            if ($isEmpty) continue;
-            if (empty($item['name']) || empty($item['category_id'])) $invalidCount++;
-            else $validCount++;
-        }
-
-        $perPage       = 50;
-        $currentPage   = 1;
-        $total         = count($allData);
-        $paginatedData = new LengthAwarePaginator(
-            $allData, $total, $perPage, $currentPage,
-            ['path' => $request->url(), 'query' => $request->query()]
-        );
-
-        // Load entity lists scoped to the active property for the form dropdowns.
-        $propertyId = auth()->user()->isSuperAdmin()
-            ? session('active_property_id')
-            : auth()->user()->property_id;
-
-        $categories     = $propertyId
-            ? Category::where('property_id', $propertyId)->orderBy('name')->get()
-            : collect();
-        $departments    = $propertyId
-            ? Department::where('property_id', $propertyId)->orderBy('name')->get()
-            : collect();
-        $categoriesMap  = $categories->keyBy('id');
-        $departmentsMap = $departments->keyBy('id');
-        $warning        = null;
-        $pageOffset     = 0;
-        $invalidPages   = [];
-
-        return view('assets.import.review', compact(
-            'paginatedData', 'categories', 'departments',
-            'categoriesMap', 'departmentsMap', 'warning', 'pageOffset', 'total',
-            'validCount', 'invalidCount', 'invalidPages'
-        ));
-    }
-
-    /**
-     * Insert assets submitted from the manual bulk-entry form (not from staging).
-     *
-     * This path is used when the user fills out the manual 5-row form rather than
-     * uploading a file. The submitted rows are validated and inserted directly;
-     * category/department IDs are cross-checked against the active property to
-     * prevent cross-tenant FK violations.
-     */
-    public function store(Request $request)
-    {
-        $this->authorize('create', \App\Models\Asset::class);
-
-        // Manual bulk entry path: no staging rows exist — read from form directly
-        $request->validate([
-            'assets'                => 'required|array',
-            'assets.*.name'         => 'required|string|max:255',
-            'assets.*.tag'          => 'required|string|max:64',
-            'assets.*.category_id'  => 'required|integer',
-            'assets.*.department_id'=> 'nullable|integer',
-            'assets.*.status'       => 'required|in:in_service,out_of_service,disposed',
-        ]);
-
-        $editorId   = auth()->id();
-        $propertyId = auth()->user()->isSuperAdmin()
-            ? session('active_property_id')
-            : auth()->user()->property_id;
-
-        abort_if(!$propertyId, 403, 'No active property selected.');
-
-        // Build lookup sets of valid FK IDs for this property; rows referencing
-        // IDs outside these sets are skipped rather than causing a DB error.
-        $validCategoryIds   = Category::where('property_id', $propertyId)->pluck('id')->flip();
-        $validDepartmentIds = Department::where('property_id', $propertyId)->pluck('id')->flip();
-
-        $allData    = collect($request->input('assets', []))->values()->toArray();
-        $insertRows = [];
-        foreach ($allData as $item) {
-            $isEmpty = empty($item['name']) && empty($item['tag']) && empty($item['category_id']);
-            if ($isEmpty) continue;
-            if (empty($item['name']) || empty($item['category_id'])) continue;
-
-            $catId  = (int) $item['category_id'];
-            $deptId = !empty($item['department_id']) ? (int) $item['department_id'] : null;
-
-            // Skip rows referencing a category or department from another property.
-            if (!isset($validCategoryIds[$catId])) continue;
-            if ($deptId && !isset($validDepartmentIds[$deptId])) $deptId = null;
-
-            $tag     = !empty($item['tag']) ? $item['tag'] : ('AST-' . strtoupper(substr(uniqid(), -6)));
-            $remarks = !empty($item['remarks'])
-                ? $item['remarks']
-                : (!empty($item['model']) ? 'Imported. Model: ' . $item['model'] : 'Imported.');
-            if (strlen($remarks) > 120) $remarks = substr($remarks, 0, 117) . '...';
-
-            $insertRows[] = [
-                'uuid'          => (string) \Illuminate\Support\Str::orderedUuid(),
-                'name'          => $item['name'],
-                'tag'           => $tag,
-                'category_id'   => $catId,
-                'department_id' => $deptId,
-                'status'        => $item['status'] ?? 'in_service',
-                'serial_number' => $item['serial_number'] ?? null,
-                'purchase_date' => $this->sanitizeDate($item['purchase_date'] ?? null),
-                'purchase_cost' => is_numeric($item['purchase_cost'] ?? '') ? $item['purchase_cost'] : null,
-                'remarks'       => $remarks,
-                'editor'        => $editorId,
-                'property_id'   => $propertyId,
-                'created_at'    => now(),
-                'updated_at'    => now(),
-            ];
-        }
-
-        \DB::beginTransaction();
-        try {
-            foreach (array_chunk($insertRows, 500) as $chunk) {
-                \DB::table('assets')->insert($chunk);
-            }
-            \DB::commit();
-        } catch (\Exception $e) {
-            \DB::rollBack();
-            Log::error('Bulk Insert Failed: ' . $e->getMessage());
-            return back()->withInput()->withErrors(['error' => 'Failed to save assets. ' . $e->getMessage()]);
-        }
-
-        // Clear session cache entries left over from the parse/mapping phase.
-        Cache::forget('import_state_' . auth()->id());
-        Cache::forget('import_review_' . auth()->id()); // legacy key, kept for safety
-
-        return redirect()->route('assets.index')->with('ok', __('assets.import_success'));
-    }
-
-    /**
      * AJAX: Return live validation counts for the review page footer.
      *
-     * Called by the frontend on page load and after storeBatch() completes
-     * to keep the valid/invalid counters in sync. Falls back to counting
-     * from the submitted form payload when no staging rows exist (manual entry).
+     * Called by the Smart Import review page (triggerPreflight) on submit to keep
+     * the valid/invalid counters in sync before the confirm modal is shown.
+     *
+     * NOTE: Manual bulk entry no longer reaches this endpoint — it moved to
+     * BulkAssetEntryController (route assets.bulk-manual) and posts natively
+     * without any pre-flight AJAX. The form-payload fallback below is therefore
+     * dead on the manual path; it now only fires in an edge case where the staging
+     * rows vanish between page render and submit (session cleanup by
+     * app:clean-abandoned-imports, a parallel tab finishing storeBatch, or the user
+     * deleting every row). Kept as a defensive no-op — it returns zero counts for a
+     * staging-backed page, which is the correct answer in that race. Do not mistake
+     * it for a live manual-entry code path.
      */
     public function calculateValidation(Request $request)
     {
@@ -798,12 +668,12 @@ class AssetImportController extends Controller
             ? session('active_property_id')
             : auth()->user()->property_id;
 
-        // Fallback for manual bulk entry (no staging rows)
+        // Fallback: no staging rows for this user+property (see NOTE above — not the manual path)
         if (!$propertyId || !\DB::table('temporary_asset_imports')
                 ->where('user_id', auth()->id())
                 ->where('property_id', $propertyId)
                 ->exists()) {
-            // Manual bulk entry path: count from submitted form data
+            // Count from the submitted form payload; yields zero for a staging-backed page
             $formAssets   = $request->input('assets', []);
             $validCount   = 0;
             $invalidCount = 0;
@@ -1084,44 +954,6 @@ class AssetImportController extends Controller
         } finally {
             $lock->release();
         }
-    }
-
-    /**
-     * Sanitize a raw date string from a spreadsheet into a Y-m-d value or null.
-     *
-     * Spreadsheets often contain placeholder text such as "N/A", "-", "?", or
-     * locale-specific formats that PostgreSQL cannot cast to the date type.
-     * This method tries several common formats and returns null for anything
-     * that cannot be parsed as a real date, preventing INSERT errors.
-     */
-    private function sanitizeDate(mixed $value): ?string
-    {
-        if (empty($value) || !is_string($value)) {
-            return null;
-        }
-
-        $value = trim($value);
-
-        if ($value === '' || $value === '-' || $value === 'N/A' || $value === '?' || $value === '0') {
-            return null;
-        }
-
-        // Try multiple common date formats from spreadsheets
-        $formats = ['Y-m-d', 'd/m/Y', 'm/d/Y', 'd-m-Y', 'Y/m/d', 'd.m.Y', 'j/n/Y', 'n/j/Y'];
-        foreach ($formats as $format) {
-            $dt = \DateTime::createFromFormat($format, $value);
-            if ($dt && $dt->format($format) === $value) {
-                return $dt->format('Y-m-d');
-            }
-        }
-
-        // Last resort: PHP's strtotime for natural-language dates
-        $ts = strtotime($value);
-        if ($ts !== false && $ts > 0) {
-            return date('Y-m-d', $ts);
-        }
-
-        return null;
     }
 
     /**

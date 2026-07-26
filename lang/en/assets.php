@@ -93,12 +93,27 @@ return [
     'preflight_valid_rows'              => 'You are about to import :count valid rows into the database.',
     'preflight_invalid_warning'         => ':count rows have missing required fields (like Category or Department) and will be skipped.',
     'confirm_save'                      => 'Confirm & Save',
+    'delete_row_title'                  => 'Delete Row',
+    'delete_row_confirm'                => 'Are you sure you want to delete this row? This action cannot be undone.',
+    'delete_row_error'                  => 'Failed to delete row: :message',
+    'batch_save_error'                  => 'An error occurred during saving: :message',
     'temporary_file_missing'            => 'Temporary file is missing or has expired.',
     'file_expired_title'                => 'Import Session Expired',
     'file_expired_message'              => 'Your temporary import session or file has expired or was deleted due to a timeout. Please upload the file again to start a new import.',
     'file_expired_action'               => 'Start New Import',
     'import_success_count'              => 'Successfully imported :count assets.',
     'saving_database'                   => 'Saving to Database...',
+    // Bulk Add Manual (standalone)
+    'remove_row'                        => 'Remove Row',
+    'bulk_manual_no_rows'               => 'Please fill in at least one row before saving.',
+    'bulk_manual_row_invalid'           => 'Row :row is incomplete. Tag, Name and Category are required.',
+    'back_to_assets'                    => 'Back to Assets',
+    'saving'                            => 'Saving…',
+    'no_active_property'                => 'Select an active property before adding assets.',
+    'no_categories_yet'                 => 'This property has no categories yet. Create at least one before adding assets.',
+    'create_category'                   => 'Create Category',
+    'duplicate_submission'              => 'That form was already submitted — nothing was saved twice.',
+    'smart_importer_badge'              => 'SmartImporter',
 ];
 
 

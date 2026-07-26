@@ -16,10 +16,21 @@
     <!-- Fonts -->
     <link rel="preconnect" href="https://fonts.bunny.net">
     <link href="https://fonts.bunny.net/css?family=figtree:400,500,600&display=swap" rel="stylesheet" />
-    <link href="https://unpkg.com/tailwindcss@1.9.6/dist/tailwind.min.css" rel="stylesheet">
     <style>
         [x-cloak] {
             display: none !important;
+        }
+
+        /* Tailwind's backdrop-blur-* utilities set backdrop-filter on the <dialog>
+           element's own box. That's a different layer from the browser-native
+           ::backdrop the dialog gets once shown via showModal() — the one the
+           spec guarantees always spans the full viewport. Blurring only the
+           dialog's own box can leave a sliver of the page (commonly near the
+           very top) rendered without blur, depending on how the browser
+           composites the two layers. Blurring ::backdrop too closes that gap. */
+        dialog.modal.backdrop-blur-sm::backdrop {
+            -webkit-backdrop-filter: blur(4px);
+            backdrop-filter: blur(4px);
         }
 
         :root {

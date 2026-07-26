@@ -93,12 +93,27 @@ return [
     'preflight_valid_rows'              => 'Anda akan mengimpor :count baris valid ke dalam database.',
     'preflight_invalid_warning'         => ':count baris memiliki data wajib yang kosong (seperti Kategori atau Departemen) dan akan dilewati.',
     'confirm_save'                      => 'Konfirmasi & Simpan',
+    'delete_row_title'                  => 'Hapus Baris',
+    'delete_row_confirm'                => 'Apakah Anda yakin ingin menghapus baris ini? Tindakan ini tidak dapat dibatalkan.',
+    'delete_row_error'                  => 'Gagal menghapus baris: :message',
+    'batch_save_error'                  => 'Terjadi kesalahan saat menyimpan: :message',
     'temporary_file_missing'            => 'File sementara hilang atau telah kedaluwarsa.',
     'file_expired_title'                => 'Sesi Impor Kedaluwarsa',
     'file_expired_message'              => 'Sesi impor atau file sementara Anda telah kedaluwarsa atau dihapus karena batas waktu. Silakan unggah file kembali untuk memulai impor baru.',
     'file_expired_action'               => 'Mulai Impor Baru',
     'import_success_count'              => 'Berhasil mengimpor :count aset.',
     'saving_database'                   => 'Menyimpan ke Database...',
+    // Bulk Add Manual (standalone)
+    'remove_row'                        => 'Hapus Baris',
+    'bulk_manual_no_rows'               => 'Mohon isi minimal satu baris sebelum menyimpan.',
+    'bulk_manual_row_invalid'           => 'Baris :row belum lengkap. Tag, Nama, dan Kategori wajib diisi.',
+    'back_to_assets'                    => 'Kembali ke Aset',
+    'saving'                            => 'Menyimpan…',
+    'no_active_property'                => 'Pilih properti aktif sebelum menambahkan aset.',
+    'no_categories_yet'                 => 'Properti ini belum punya kategori. Buat minimal satu sebelum menambahkan aset.',
+    'create_category'                   => 'Buat Kategori',
+    'duplicate_submission'              => 'Formulir itu sudah dikirim — tidak ada data yang tersimpan dua kali.',
+    'smart_importer_badge'              => 'SmartImporter',
 ];
 
 

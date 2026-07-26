@@ -54,7 +54,18 @@
                                 <x-heroicon-o-document-arrow-up class="w-6 h-6" />
                             </div>
                             <div class="flex-1">
-                                <h3 class="font-semibold text-gray-900 dark:text-gray-100 text-sm mb-1">{{ __('assets.smart_import') }}</h3>
+                                <div class="flex items-center gap-2 mb-1 flex-wrap">
+                                    <h3 class="font-semibold text-gray-900 dark:text-gray-100 text-sm">{{ __('assets.smart_import') }}</h3>
+                                    {{-- Brand marker: this is the only option with automatic column
+                                         mapping, so it carries the SmartImporter badge. --}}
+                                    <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full leading-none
+                                                 bg-emerald-500/10 dark:bg-emerald-500/20 border border-emerald-500/30
+                                                 text-emerald-600 dark:text-emerald-400
+                                                 text-[10px] font-bold tracking-wide normal-case">
+                                        <x-heroicon-s-sparkles class="w-3 h-3" />
+                                        {{ __('assets.smart_importer_badge') }}
+                                    </span>
+                                </div>
                                 <p class="text-xs text-gray-500 dark:text-gray-400">{{ __('assets.smart_import_desc') }}</p>
                             </div>
                             <div class="text-gray-400">

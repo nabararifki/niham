@@ -3,6 +3,7 @@
 use App\Http\Controllers\AssetController;
 use App\Http\Controllers\Auth\GoogleLoginController;
 use App\Http\Controllers\BackupController;
+use App\Http\Controllers\BulkAssetEntryController;
 use App\Http\Controllers\CategoryController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\DepartmentController;
@@ -15,7 +16,6 @@ use App\Http\Controllers\QrController;
 use App\Http\Controllers\RoleController;
 use App\Http\Controllers\UserController;
 use App\Http\Controllers\AssetImportController;
-use App\Http\Controllers\JobController;
 use App\Http\Controllers\LocationController;
 use Illuminate\Support\Facades\Route;
 
@@ -63,12 +63,18 @@ Route::middleware('auth')->group(function () {
         Route::get('/import-rapid-add', 'rapidAdd')->name('import-rapid-add');
         Route::post('/import-rapid-add', 'storeRapidAdd')->name('import-rapid-add.store');
         Route::get('/import-review', 'review')->name('import-review');
-        Route::post('/import-store', 'store')->name('import-store');
         Route::post('/import/store-batch', 'storeBatch')->name('import-store-batch');
         Route::post('/import-calculate-validation', 'calculateValidation')->name('import-calculate-validation');
         Route::post('/import/update-row', 'updateSingleRow')->name('import.update-row');
         Route::post('/import/delete-row', 'deleteRow')->name('import.delete-row');
-        Route::get('/bulk-manual', 'bulkManual')->name('bulk-manual');
+    });
+
+    // Bulk Add Manual (standalone — never touches temporary_asset_imports).
+    // Must be declared before Route::resources below, or GET /assets/{asset}
+    // would swallow /assets/bulk-manual.
+    Route::controller(BulkAssetEntryController::class)->prefix('assets')->name('assets.')->group(function () {
+        Route::get('/bulk-manual', 'create')->name('bulk-manual');
+        Route::post('/bulk-manual', 'store')->name('bulk-manual.store');
     });
 
     // OCR Analysis
@@ -87,20 +93,11 @@ Route::middleware('auth')->group(function () {
         'categories' => CategoryController::class,
         'users' => UserController::class,
         'properties' => PropertyController::class,
-        'jobs' => JobController::class,
     ]);
 
     // Tenancy (Property Switching)
     Route::controller(PropertyController::class)->group(function () {
         Route::post('/properties/switch', 'switchProperty')->name('properties.switch');
-        Route::get('/select-property', 'selectForm')->name('properties.select.form');
-        Route::post('/select-property', 'select')->name('properties.select');
-    });
-
-    // Jobs Extended Attributes
-    Route::controller(JobController::class)->prefix('jobs')->name('jobs.')->group(function () {
-        Route::patch('/{job}/status', 'updateStatus')->name('status');
-        Route::post('/{job}/comments', 'addComment')->name('comments');
     });
 
     // Global Backup/Restore

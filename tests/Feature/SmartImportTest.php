@@ -381,9 +381,79 @@ class SmartImportTest extends TestCase
         $response->assertSee('Review Asset');
     }
 
+    /**
+     * review() redirects when there are no staging rows for the acting user's
+     * property, so any test rendering that page needs at least one row seeded.
+     */
+    private function seedStagingRowForUserA(): void
+    {
+        \Illuminate\Support\Facades\DB::table('temporary_asset_imports')->insert([
+            'user_id'     => $this->userA->id,
+            'property_id' => $this->propertyA->id,
+            'tag'         => 'RV-DEL-001',
+            'name'        => 'Deletable Row',
+            'category_id' => $this->categoryA->id,
+            'department_id' => $this->departmentA->id,
+            'status'      => 'in_service',
+            'is_invalid'  => false,
+            'created_at'  => now(),
+            'updated_at'  => now(),
+        ]);
+    }
+
+    /**
+     * The delete-row confirmation used to be a browser confirm() with hardcoded
+     * Indonesian text, which could not be localized or styled. It must now be a
+     * real modal, wired through Alpine, with the browser-native dialog gone.
+     */
+    public function test_review_page_uses_modal_instead_of_native_confirm_for_row_delete(): void
+    {
+        $this->actingAs($this->userA);
+        $this->seedStagingRowForUserA();
+
+        $response = $this->get(route('assets.import-review'));
+
+        $response->assertStatus(200);
+        $response->assertSee('id="delete_row_modal"', false);
+        $response->assertSee('requestDeleteRow', false);
+        $response->assertSee('confirmDeleteRow', false);
+        $response->assertSee('cancelDeleteRow', false);
+        $response->assertDontSee('Apakah Anda yakin ingin menghapus baris data ini?');
+        $response->assertDontSee('confirm(\'', false);
+    }
+
+    /**
+     * The modal's copy must follow the active locale, unlike the old confirm()
+     * which was stuck in Indonesian regardless of app()->getLocale().
+     */
+    public function test_delete_row_modal_text_follows_active_locale(): void
+    {
+        $this->actingAs($this->userA);
+        $this->seedStagingRowForUserA();
+
+        app()->setLocale('en');
+        $enResponse = $this->get(route('assets.import-review'));
+        $enResponse->assertStatus(200);
+        $enResponse->assertSee(__('assets.delete_row_confirm'));
+
+        app()->setLocale('id');
+        $idResponse = $this->get(route('assets.import-review'));
+        $idResponse->assertStatus(200);
+        $idResponse->assertSee(__('assets.delete_row_confirm'));
+
+        // Sanity check that the two locale strings actually differ, so the
+        // assertions above are not both trivially matching the same text.
+        app()->setLocale('en');
+        $enText = __('assets.delete_row_confirm');
+        app()->setLocale('id');
+        $idText = __('assets.delete_row_confirm');
+        $this->assertNotEquals($enText, $idText);
+    }
+
     public function test_review_redirects_when_cache_null(): void
     {
         $this->actingAs($this->userA);
+        // R6: redirect happens when staging table has no rows for this user+property
         $response = $this->get(route('assets.import-review'));
         $response->assertRedirect(route('assets.index'));
     }
@@ -402,7 +472,7 @@ class SmartImportTest extends TestCase
     public function test_bulk_store_assigns_correct_property_id_to_user_a(): void
     {
         $this->actingAs($this->userA);
-        $response = $this->post(route('assets.import-store'), [
+        $response = $this->post(route('assets.bulk-manual.store'), [
             'assets' => [[
                 'name' => 'Tenant A Asset', 'tag' => 'TA-001',
                 'category_id' => $this->categoryA->id, 'department_id' => $this->departmentA->id,
@@ -418,7 +488,7 @@ class SmartImportTest extends TestCase
     public function test_bulk_store_assigns_correct_property_id_to_user_b(): void
     {
         $this->actingAs($this->userB);
-        $response = $this->post(route('assets.import-store'), [
+        $response = $this->post(route('assets.bulk-manual.store'), [
             'assets' => [[
                 'name' => 'Tenant B Asset', 'tag' => 'TB-001',
                 'category_id' => $this->categoryB->id, 'department_id' => $this->departmentB->id,
@@ -449,7 +519,7 @@ class SmartImportTest extends TestCase
         $cacheKey = 'import_review_'.$this->userA->id;
         Cache::put($cacheKey, [['name' => 'temp']], now()->addMinutes(30));
 
-        $this->post(route('assets.import-store'), [
+        $this->post(route('assets.bulk-manual.store'), [
             'assets' => [[
                 'name' => 'Cache Clear Asset', 'tag' => 'CC-001',
                 'category_id' => $this->categoryA->id, 'department_id' => $this->departmentA->id,
@@ -463,7 +533,7 @@ class SmartImportTest extends TestCase
     public function test_bulk_store_validates_required_fields(): void
     {
         $this->actingAs($this->userA);
-        $response = $this->post(route('assets.import-store'), [
+        $response = $this->post(route('assets.bulk-manual.store'), [
             'assets' => [[
                 'category_id' => $this->categoryA->id,
                 'department_id' => $this->departmentA->id,
@@ -484,7 +554,7 @@ class SmartImportTest extends TestCase
 
     public function test_store_requires_authentication(): void
     {
-        $response = $this->post(route('assets.import-store'), [
+        $response = $this->post(route('assets.bulk-manual.store'), [
             'assets' => [['name' => 'X', 'tag' => 'X', 'category_id' => 1, 'department_id' => 1, 'status' => 'in_service']],
         ]);
         $response->assertRedirect(route('login'));
@@ -493,7 +563,7 @@ class SmartImportTest extends TestCase
     public function test_multiple_assets_bulk_insert(): void
     {
         $this->actingAs($this->userA);
-        $response = $this->post(route('assets.import-store'), [
+        $response = $this->post(route('assets.bulk-manual.store'), [
             'assets' => [
                 ['name' => 'Bulk 1', 'tag' => 'BA-001', 'category_id' => $this->categoryA->id, 'department_id' => $this->departmentA->id, 'status' => 'in_service'],
                 ['name' => 'Bulk 2', 'tag' => 'BA-002', 'category_id' => $this->categoryA->id, 'department_id' => $this->departmentA->id, 'status' => 'out_of_service'],

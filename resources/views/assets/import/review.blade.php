@@ -36,7 +36,11 @@
 
             {{-- ─── Main Card ───────────────────────────────────────────────────── --}}
             <div class="bg-white/90 dark:bg-gray-800/90 backdrop-blur-md shadow-xl sm:rounded-2xl border border-gray-200/50 dark:border-gray-700/50 overflow-hidden">
-                <form action="{{ route('assets.import-store') }}" method="POST" id="review-form" @submit.prevent="triggerPreflight()">
+                {{-- No action: this form is never submitted natively. Submit is always
+                     intercepted by triggerPreflight(), and saving goes through
+                     saveAll() → storeBatch(). It exists only to group the fields
+                     that triggerPreflight() serialises via FormData. --}}
+                <form method="POST" id="review-form" @submit.prevent="triggerPreflight()">
                     @csrf
 
                     {{-- Pass page offset so store() can merge edits at the correct global indices --}}
@@ -383,6 +387,38 @@
                 </div>
             </dialog>
 
+            {{-- Delete Row Confirmation Modal --}}
+            <dialog id="delete_row_modal" class="modal modal-bottom sm:modal-middle backdrop-blur-sm">
+                <div class="modal-box bg-white/95 dark:bg-gray-800/95 backdrop-blur-md border border-gray-200/50 dark:border-gray-700/50 shadow-2xl rounded-2xl p-6 text-gray-900 dark:text-gray-100">
+                    <div class="flex justify-between items-center pb-4 border-b border-gray-200/50 dark:border-gray-700/50 mb-4">
+                        <h3 class="font-bold text-lg text-gray-900 dark:text-white">
+                            {{ __('assets.delete_row_title') }}
+                        </h3>
+                        <form method="dialog">
+                            <button @click="cancelDeleteRow()" class="text-gray-500 hover:text-gray-700 dark:hover:text-gray-300">
+                                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                            </button>
+                        </form>
+                    </div>
+
+                    <p class="text-sm text-gray-700 dark:text-gray-300 leading-relaxed my-4">
+                        {{ __('assets.delete_row_confirm') }}
+                    </p>
+
+                    <div class="modal-action border-t border-gray-200/50 dark:border-gray-700/50 pt-4 flex justify-end gap-3">
+                        <button type="button" @click="cancelDeleteRow()"
+                                class="btn btn-sm btn-ghost border border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg">
+                            {{ __('messages.cancel') }}
+                        </button>
+                        <button type="button" @click="confirmDeleteRow()"
+                                class="btn btn-sm btn-error border-transparent text-white hover:opacity-90 rounded-lg">
+                            <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+                            {{ __('messages.yes_delete') }}
+                        </button>
+                    </div>
+                </div>
+            </dialog>
+
         </div>{{-- /max-w --}}
     </div>
 
@@ -396,6 +432,8 @@
                 invalidCount: config.invalidCount || 0,
                 invalidPages: config.invalidPages || [],
                 totalRows: config.total || 0,
+                pendingDeleteIndex: null,
+                pendingDeleteScope: null,
 
                 get validText() {
                     return @json(__('assets.preflight_valid_rows', ['count' => '__COUNT__'])).replace('__COUNT__', Number(this.validCount).toLocaleString());
@@ -405,40 +443,66 @@
                     return @json(__('assets.preflight_invalid_warning', ['count' => '__COUNT__'])).replace('__COUNT__', Number(this.invalidCount).toLocaleString());
                 },
 
-                async deleteRow(absoluteIndex, trScope) {
-                    if (confirm('Apakah Anda yakin ingin menghapus baris data ini?')) {
-                        try {
-                            const response = await fetch('{{ route("assets.import.delete-row") }}', {
-                                method: 'POST',
-                                headers: {
-                                    'Content-Type': 'application/json',
-                                    'X-CSRF-TOKEN': '{{ csrf_token() }}',
-                                    'X-Requested-With': 'XMLHttpRequest',
-                                    'Accept': 'application/json'
-                                },
-                                body: JSON.stringify({
-                                    absolute_index: absoluteIndex
-                                })
-                            });
+                // Opens delete_row_modal instead of the browser's native confirm() —
+                // confirm() can't be styled or localized through Blade at all, which is
+                // why it was stuck showing hardcoded Indonesian regardless of locale.
+                requestDeleteRow(absoluteIndex, trScope) {
+                    this.pendingDeleteIndex = absoluteIndex;
+                    this.pendingDeleteScope = trScope;
+                    document.getElementById('delete_row_modal').showModal();
+                },
 
-                            if (!response.ok) {
-                                throw new Error('Delete request failed');
-                            }
+                cancelDeleteRow() {
+                    document.getElementById('delete_row_modal').close();
+                    this.pendingDeleteIndex = null;
+                    this.pendingDeleteScope = null;
+                },
 
-                            const data = await response.json();
-                            if (data.success) {
-                                this.validCount = data.validCount;
-                                this.invalidCount = data.invalidCount;
-                                this.totalRows = data.totalCount;
-                                this.invalidPages = data.invalidPages;
+                async confirmDeleteRow() {
+                    document.getElementById('delete_row_modal').close();
+                    const absoluteIndex = this.pendingDeleteIndex;
+                    this.pendingDeleteIndex = null;
+                    this.pendingDeleteScope = null;
+                    if (absoluteIndex === null) return;
 
-                                // Reload page so pagination and DOM indices align perfectly with database
-                                window.location.reload();
-                            }
-                        } catch (err) {
-                            console.error('Delete failed:', err);
-                            alert('Gagal menghapus baris: ' + err.message);
+                    try {
+                        const response = await fetch('{{ route("assets.import.delete-row") }}', {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'X-CSRF-TOKEN': '{{ csrf_token() }}',
+                                'X-Requested-With': 'XMLHttpRequest',
+                                'Accept': 'application/json'
+                            },
+                            body: JSON.stringify({
+                                absolute_index: absoluteIndex
+                            })
+                        });
+
+                        if (!response.ok) {
+                            throw new Error('Delete request failed');
                         }
+
+                        const data = await response.json();
+                        if (data.success) {
+                            this.validCount = data.validCount;
+                            this.invalidCount = data.invalidCount;
+                            this.totalRows = data.totalCount;
+                            this.invalidPages = data.invalidPages;
+
+                            // Reload page so pagination and DOM indices align perfectly with database
+                            window.location.reload();
+                        }
+                    } catch (err) {
+                        console.error('Delete failed:', err);
+                        {{-- Blade comment (not a // one): a literal "@word(" in a JS comment
+                             here would itself get parsed as a directive, since script blocks
+                             aren't exempt from directive scanning. @js is used because @json
+                             splits its expression on commas, which would swallow the
+                             ['message' => ...] argument as the encoding-flags parameter. --}}
+                        const message = @js(__('assets.delete_row_error', ['message' => '__MSG__']))
+                            .replace('__MSG__', err.message);
+                        alert(message);
                     }
                 },
 
@@ -510,11 +574,6 @@
                     }
                 },
 
-                submitForm() {
-                    document.getElementById('preflight_modal').close();
-                    document.getElementById('review-form').submit();
-                },
-
                 async saveAll() {
                     document.getElementById('preflight_modal').close();
                     document.getElementById('save_progress_modal').showModal();
@@ -570,7 +629,11 @@
                             isCompleted = data.is_completed;
                         } catch (err) {
                             console.error('Batch save failed:', err);
-                            alert('An error occurred during saving: ' + err.message);
+                            {{-- @js: same reasoning as the delete-row error above — @json
+                                 would eat ['message' => ...] as its encoding-flags arg. --}}
+                            const message = @js(__('assets.batch_save_error', ['message' => '__MSG__']))
+                                .replace('__MSG__', err.message);
+                            alert(message);
                             this.isSaving = false;
                             document.getElementById('save_progress_modal').close();
                             return;
