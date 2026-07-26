@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.4] - 2026-07-26
+### Changed
+- **Staging-Based Import Architecture**: Replaced the Cache-based Smart Import staging approach with a `temporary_asset_imports` database table (`TemporaryAssetImport` model), enabling row-level `review()`/`storeBatch()`/`updateSingleRow()`/`deleteRow()` operations instead of a single serialized cache array.
+- **Bulk Add Manual Separation**: Moved manual bulk asset entry out of the Smart Import review page into its own `BulkAssetEntryController`, dedicated route (`assets.bulk-manual`), and standalone view — no longer sharing Smart Import's staging endpoints.
+- **Shared Date Sanitization**: Extracted `sanitizeDate()` into a `SanitizesImportDates` trait shared by `BulkAssetEntryController` and `ProcessImportJob`.
+- **Import View Organization**: Moved `pagination.blade.php` under `resources/views/assets/import/partials/`.
+
+### Fixed
+- **Manual Bulk Entry False Success**: Fixed Bulk Add Manual reporting success without saving any data — its confirm button previously called the Smart Import staging endpoint (`storeBatch()`), which found zero rows because manual entries never populated the staging table.
+- **Grid Fields Permanently Disabled**: Fixed a `:disabled="isEmptyRow(row)"` binding on the manual entry grid that disabled every field from the very first render (all rows start empty), making the form impossible to fill in.
+- **Property Detection**: Fixed the manual entry page reporting "no active property selected" for a super-admin who had already switched to a property that simply had no categories yet.
+- **Alpine Initialization**: Fixed `@json` inside `x-data` HTML attributes breaking Alpine's parser whenever an interpolated value contains a string (switched to `@js`).
+- **Localized Confirmations**: Replaced native `confirm()`/`alert()` dialogs on the Smart Import review page — hardcoded in Indonesian regardless of locale — with a localized, styled modal.
+- **Modal Backdrop Blur**: Fixed `backdrop-blur-*` on `<dialog>` elements not covering the full viewport by also blurring the native `::backdrop` layer.
+- **Dead Routes Removed**: Removed unreachable `/select-property` routes (controller methods were never implemented) and an unbuilt "jobs" resource/route group.
+
 ## [0.14.3] - 2026-07-14
 ### Changed
 - **Database Persistence Optimization**: Migrated the store method in `AssetImportController` to perform chunked bulk inserts (`DB::table('assets')->insert`) rather than looping individual Eloquent model creates, reducing memory consumption and improving database persistence speed.
