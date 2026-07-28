@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.5] - 2026-07-28
+### Fixed
+- **Aborted Import Leaking Into The Next Upload**: Fixed a cancelled Smart Import bleeding state into the following upload — the progress modal showed the previous file's row count while the review page showed the latest file's data. Every cache key in the flow was scoped by user id alone, and `cancel()` stored the cancellation as a status inside `import_progress_<uid>` that the next `processMapping()` overwrote, erasing the signal while the abandoned job was still alive. `processMapping()` now stamps each dispatch with a UUID `import_id` and `ProcessImportJob` gates every side effect behind `isCurrentAttempt()`.
+- **Zombie Job Wiping Live Staging Rows**: Fixed `ProcessImportJob` deleting all staging rows for the user+property as its first action with no cancellation check in front of it, letting a superseded job wipe the rows of the import the user was actually waiting on and re-insert its own.
+- **Cancelling Small Imports Did Nothing**: Fixed the cancellation check existing only inside the 500-row chunk block, so any file smaller than one chunk never reached it and imported anyway.
+- **Superseded Job Deleting A Shared Temp File**: Fixed cleanup deleting a temp file the live import was still reading from — cancel → reload → re-submit reuses the same `temp_file_path`. Only the current attempt may clean up; leftovers are swept by `app:clean-abandoned-imports`.
+- **Partial Progress Record**: Fixed `cancel()` writing a status-only record that `status()` returned raw, leaving consumers without `percentage`/`processed`/`total`/`error`.
+- **Reader Handle Leak**: Fixed the OpenSpout reader not being closed on the chunk-boundary early return.
+
+### Changed
+- **Heatmap Page Calculation**: Replaced three copies of the pagination-heatmap calculation — each pulling every staging `id` into PHP and `array_flip()`ing it, repeated on every single-cell auto-save — with a single `invalidPageNumbers()` helper backed by one PostgreSQL `ROW_NUMBER()` aggregate. Memory drops from O(rows) to O(pages containing invalid rows).
+- **Import Lifecycle Test Coverage**: Added 6 tests to `SmartImportTest` (29 → 35) covering `processMapping()`, `status()`, `cancel()` and `ProcessImportJob`, which previously had none. Full suite 91 → 97.
+
+### Upgrade Notes
+- **Drain the queue before deploying.** `ProcessImportJob` takes a new required constructor argument, so jobs already serialised in the `jobs` table cannot be unserialized. Run `php artisan queue:work --stop-when-empty`, confirm the `jobs` table is empty, then deploy and restart the worker.
+
 ## [0.14.4] - 2026-07-26
 ### Changed
 - **Staging-Based Import Architecture**: Replaced the Cache-based Smart Import staging approach with a `temporary_asset_imports` database table (`TemporaryAssetImport` model), enabling row-level `review()`/`storeBatch()`/`updateSingleRow()`/`deleteRow()` operations instead of a single serialized cache array.
