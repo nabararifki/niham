@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Jobs\ProcessImportJob;
 use App\Models\Asset;
 use App\Models\Category;
 use App\Models\Department;
@@ -845,6 +846,302 @@ class SmartImportTest extends TestCase
         $remaining = \DB::table('temporary_asset_imports')->where('user_id', $this->userA->id)->get();
         $this->assertCount(1, $remaining);
         $this->assertEquals('TAG-B', $remaining[0]->tag);
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // 6. IMPORT ATTEMPT LIFECYCLE (abort → residual state on re-upload)
+    // ══════════════════════════════════════════════════════════════
+
+    /**
+     * Write a CSV onto the faked local disk using the exact filename shape
+     * processMapping() will accept (temp/import_<hex>.<ext>).
+     *
+     * @param  array<string, string>  $rows  tag => name
+     */
+    private function seedImportFile(string $hexId, array $rows): string
+    {
+        $csv = "Tag,Name\n";
+        foreach ($rows as $tag => $name) {
+            $csv .= $tag . ',' . $name . "\n";
+        }
+
+        $path = 'temp/import_' . $hexId . '.csv';
+        \Illuminate\Support\Facades\Storage::disk('local')->put($path, $csv);
+
+        return $path;
+    }
+
+    /** The cache entry parse() leaves behind for a given temp file. */
+    private function seedImportState(string $tempFilePath): void
+    {
+        Cache::put('import_state_' . $this->userA->id, [
+            'temp_file_path'      => $tempFilePath,
+            'sheets'              => ['Sheet1'],
+            'true_header'         => ['Tag', 'Name'],
+            'preview_data'        => [],
+            'mapping_proposals'   => [],
+            'current_sheet_index' => 0,
+        ], 1800);
+    }
+
+    /** The mapping payload the frontend posts to processMapping(). */
+    private function mappingPayload(string $tempFilePath): array
+    {
+        return [
+            'temp_file_path' => $tempFilePath,
+            'selected_sheet' => 0,
+            'mapping'        => [
+                'tag'  => ['columns' => ['Tag'], 'separator' => ' '],
+                'name' => ['columns' => ['Name'], 'separator' => ' '],
+            ],
+        ];
+    }
+
+    /**
+     * Reproduce the exact sequence from the bug report.
+     *
+     * Attempt A is dispatched but not yet picked up by a worker (or is sitting
+     * between two chunk boundaries — indistinguishable from the job's point of
+     * view). The user aborts it, then immediately uploads a different file and
+     * starts attempt B, which runs inline here because QUEUE_CONNECTION=sync.
+     *
+     * Returns attempt A's job object, still unexecuted, so each test can decide
+     * what to assert once that zombie finally runs.
+     */
+    private function abortAttemptAThenStartAttemptB(): ProcessImportJob
+    {
+        $progressKey = 'import_progress_' . $this->userA->id;
+
+        // ── Attempt A: three rows ─────────────────────────────────────
+        $fileA = $this->seedImportFile('aaa111', [
+            'A-1' => 'Alpha One',
+            'A-2' => 'Alpha Two',
+            'A-3' => 'Alpha Three',
+        ]);
+        $this->seedImportState($fileA);
+        Cache::put($progressKey, [
+            'status'     => 'processing',
+            'percentage' => 0,
+            'processed'  => 0,
+            'total'      => 0,
+            'error'      => '',
+            'import_id'  => 'attempt-a',
+        ], 600);
+
+        $zombie = new ProcessImportJob(
+            $this->userA->id,
+            $fileA,
+            $this->mappingPayload($fileA),
+            0,
+            'attempt-a',
+        );
+
+        // ── User aborts attempt A ─────────────────────────────────────
+        $this->postJson(route('assets.import.cancel'))->assertStatus(200);
+
+        // ── User starts attempt B (two rows), which completes inline ──
+        $fileB = $this->seedImportFile('bbb222', [
+            'B-1' => 'Bravo One',
+            'B-2' => 'Bravo Two',
+        ]);
+        $this->seedImportState($fileB);
+        $this->postJson(route('assets.import.process-mapping'), [
+            'payload' => json_encode($this->mappingPayload($fileB)),
+        ])->assertStatus(200);
+
+        return $zombie;
+    }
+
+    public function test_superseded_import_job_cannot_clobber_a_newer_attempts_progress(): void
+    {
+        $this->actingAs($this->userA);
+
+        $zombie = $this->abortAttemptAThenStartAttemptB();
+
+        // The worker finally gets to the aborted attempt.
+        $zombie->handle();
+
+        $progress = Cache::get('import_progress_' . $this->userA->id);
+
+        $this->assertSame(
+            2,
+            $progress['total'],
+            'Superseded attempt A overwrote the progress bar with its own row count (3) — this is the reported symptom.'
+        );
+        $this->assertSame(2, $progress['processed']);
+    }
+
+    public function test_superseded_import_job_does_not_delete_a_newer_attempts_staging_rows(): void
+    {
+        $this->actingAs($this->userA);
+
+        $zombie = $this->abortAttemptAThenStartAttemptB();
+
+        $this->assertSame(2, \DB::table('temporary_asset_imports')->where('user_id', $this->userA->id)->count());
+
+        $zombie->handle();
+
+        $names = \DB::table('temporary_asset_imports')
+            ->where('user_id', $this->userA->id)
+            ->orderBy('id')
+            ->pluck('name')
+            ->toArray();
+
+        $this->assertSame(
+            ['Bravo One', 'Bravo Two'],
+            $names,
+            'Superseded attempt A wiped attempt B staging rows via its start-of-run DELETE and re-inserted its own.'
+        );
+    }
+
+    public function test_superseded_import_job_does_not_delete_a_temp_file_the_live_attempt_is_reading(): void
+    {
+        $this->actingAs($this->userA);
+
+        $progressKey = 'import_progress_' . $this->userA->id;
+
+        // Cancel → reload → re-submit the same mapping page reuses temp_file_path,
+        // so the abandoned attempt and the live one can point at the same file.
+        $sharedFile = $this->seedImportFile('aaa111', [
+            'A-1' => 'Alpha One',
+            'A-2' => 'Alpha Two',
+            'A-3' => 'Alpha Three',
+        ]);
+        $this->seedImportState($sharedFile);
+
+        $zombie = new ProcessImportJob(
+            $this->userA->id,
+            $sharedFile,
+            $this->mappingPayload($sharedFile),
+            0,
+            'attempt-a',
+        );
+
+        // Attempt B was dispatched against that same file and is mid-stream —
+        // the state a real queue worker would find while it wakes up job A.
+        Cache::put($progressKey, [
+            'status'     => 'processing',
+            'percentage' => 10,
+            'processed'  => 100,
+            'total'      => 1000,
+            'error'      => '',
+            'import_id'  => 'attempt-b',
+        ], 600);
+
+        $zombie->handle();
+
+        $this->assertTrue(
+            \Illuminate\Support\Facades\Storage::disk('local')->exists($sharedFile),
+            'Superseded attempt A deleted the temp file that the live attempt B is still reading from.'
+        );
+
+        $progress = Cache::get($progressKey);
+        $this->assertSame('attempt-b', $progress['import_id']);
+        $this->assertSame(1000, $progress['total'], 'Superseded attempt A overwrote the in-flight attempt B progress record.');
+    }
+
+    public function test_cancel_within_the_same_attempt_still_stops_the_job(): void
+    {
+        $this->actingAs($this->userA);
+
+        $progressKey = 'import_progress_' . $this->userA->id;
+
+        // Under 500 rows, so the job never reaches a chunk boundary.
+        $file = $this->seedImportFile('ccc333', [
+            'C-1' => 'Charlie One',
+            'C-2' => 'Charlie Two',
+            'C-3' => 'Charlie Three',
+        ]);
+        $this->seedImportState($file);
+        Cache::put($progressKey, [
+            'status'     => 'processing',
+            'percentage' => 0,
+            'processed'  => 0,
+            'total'      => 0,
+            'error'      => '',
+            'import_id'  => 'attempt-c',
+        ], 600);
+
+        $job = new ProcessImportJob(
+            $this->userA->id,
+            $file,
+            $this->mappingPayload($file),
+            0,
+            'attempt-c',
+        );
+
+        $this->postJson(route('assets.import.cancel'))->assertStatus(200);
+
+        $job->handle();
+
+        $this->assertSame(
+            0,
+            \DB::table('temporary_asset_imports')->where('user_id', $this->userA->id)->count(),
+            'A cancelled job still imported its rows — the cancellation check only runs at 500-row chunk boundaries.'
+        );
+        $this->assertSame('cancelled', Cache::get($progressKey)['status']);
+        $this->assertTrue(
+            \Illuminate\Support\Facades\Storage::disk('local')->exists($file),
+            'A cancelled attempt must keep its temp file so the user can retry from the mapping page.'
+        );
+    }
+
+    public function test_cancel_records_a_full_progress_shape(): void
+    {
+        $this->actingAs($this->userA);
+
+        Cache::put('import_progress_' . $this->userA->id, [
+            'status'     => 'processing',
+            'percentage' => 42,
+            'processed'  => 420,
+            'total'      => 1000,
+            'error'      => '',
+            'import_id'  => 'attempt-d',
+        ], 600);
+
+        $this->postJson(route('assets.import.cancel'))->assertStatus(200);
+
+        $this->getJson(route('assets.import-status'))
+            ->assertStatus(200)
+            ->assertJsonStructure(['status', 'percentage', 'processed', 'total', 'error'])
+            ->assertJson([
+                'status'     => 'cancelled',
+                'percentage' => 42,
+                'processed'  => 420,
+                'total'      => 1000,
+            ]);
+    }
+
+    public function test_invalid_pages_are_computed_at_page_boundaries(): void
+    {
+        $this->actingAs($this->userA);
+
+        // 101 rows, 50 per page. Invalid at 0-based positions 0, 49, 50 and 100
+        // → pages 1, 1, 2 and 3. Pins the boundary arithmetic itself.
+        $invalidPositions = [0, 49, 50, 100];
+        $rows = [];
+        for ($i = 0; $i <= 100; $i++) {
+            $isInvalid = in_array($i, $invalidPositions, true);
+            $rows[] = [
+                'user_id'       => $this->userA->id,
+                'property_id'   => $this->propertyA->id,
+                'tag'           => 'TAG-' . $i,
+                'name'          => $isInvalid ? '' : 'Row ' . $i,
+                'category_id'   => $this->categoryA->id,
+                'department_id' => $this->departmentA->id,
+                'status'        => 'in_service',
+                'is_invalid'    => $isInvalid,
+                'created_at'    => now(),
+                'updated_at'    => now(),
+            ];
+        }
+        foreach (array_chunk($rows, 500) as $chunk) {
+            \DB::table('temporary_asset_imports')->insert($chunk);
+        }
+
+        $this->get(route('assets.import-review', ['page' => 1]))
+            ->assertStatus(200)
+            ->assertViewHas('invalidPages', [1, 2, 3]);
     }
 }
 

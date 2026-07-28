@@ -10,9 +10,11 @@ use App\Services\EntityCodeGeneratorService;
 use App\Traits\SanitizesImportDates;
 use Illuminate\Http\Request;
 use Illuminate\Pagination\LengthAwarePaginator;
+use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 
 class AssetImportController extends Controller
 {
@@ -266,6 +268,16 @@ class AssetImportController extends Controller
         $importState['property_id'] = $propertyId;
         Cache::put('import_state_' . auth()->id(), $importState, 1800);
 
+        // Stamp this dispatch with its own identity. The scope is deliberately the
+        // *dispatch*, not the upload: cancelling and re-submitting the same file
+        // from the mapping page is a new attempt, and the abandoned job must not
+        // recognise itself in the new one's progress record.
+        //
+        // Everything in this flow is keyed by user id alone, so without this the
+        // seed below silently erases a pending cancellation and hands the old job
+        // permission to keep writing over the new import's progress and staging rows.
+        $attemptId = (string) Str::uuid();
+
         // Seed initial progress cache (all keys present for frontend)
         $progressKey = 'import_progress_' . auth()->id();
         Cache::put($progressKey, [
@@ -274,6 +286,7 @@ class AssetImportController extends Controller
             'processed'  => 0,
             'total'      => 0,
             'error'      => '',
+            'import_id'  => $attemptId,
         ], 600);
 
         try {
@@ -283,6 +296,7 @@ class AssetImportController extends Controller
                 $tempFilePath,
                 $payload,
                 $selectedSheet,
+                $attemptId,
             );
         } catch (\Throwable $e) {
             Log::error('Failed to dispatch ProcessImportJob: ' . $e->getMessage());
@@ -292,6 +306,7 @@ class AssetImportController extends Controller
                 'processed'  => 0,
                 'total'      => 0,
                 'error'      => $e->getMessage(),
+                'import_id'  => $attemptId,
             ], 600);
 
             return response()->json([
@@ -311,19 +326,24 @@ class AssetImportController extends Controller
      */
     public function status()
     {
+        $default = [
+            'status'     => 'pending',
+            'percentage' => 0,
+            'processed'  => 0,
+            'total'      => 0,
+            'error'      => '',
+        ];
+
         $progress = Cache::get('import_progress_' . auth()->id());
 
-        if (!$progress) {
-            return response()->json([
-                'status'     => 'pending',
-                'percentage' => 0,
-                'processed'  => 0,
-                'total'      => 0,
-                'error'      => '',
-            ]);
+        if (!is_array($progress)) {
+            return response()->json($default);
         }
 
-        return response()->json($progress);
+        // Normalise onto the full shape — writers have historically stored partial
+        // records — and keep import_id internal; it is bookkeeping for the worker,
+        // not something the progress modal needs.
+        return response()->json(array_merge($default, Arr::except($progress, ['import_id'])));
     }
 
     /**
@@ -583,26 +603,8 @@ class AssetImportController extends Controller
             ->count();
         $invalidCount = $total - $validCount;
 
-        // Compute which page numbers contain invalid rows (for pagination heatmap)
-        $invalidRows = $stagingBase->clone()
-            ->where('is_invalid', true)
-            ->orderBy('id')
-            ->select('id')
-            ->get();
-
-        // Map row positions to page numbers using row_number equivalent
-        $allIds     = $stagingBase->clone()->orderBy('id')->pluck('id')->toArray();
-        $idToPosition = array_flip($allIds); // id => 0-based position
-        $invalidPages = [];
-        foreach ($invalidRows as $row) {
-            $pos  = $idToPosition[$row->id] ?? null;
-            if ($pos !== null) {
-                $page = (int) ceil(($pos + 1) / $perPage);
-                if (!in_array($page, $invalidPages)) {
-                    $invalidPages[] = $page;
-                }
-            }
-        }
+        // Which page numbers contain invalid rows (for the pagination heatmap)
+        $invalidPages = $this->invalidPageNumbers($stagingBase, $perPage);
 
         // ── Paginate directly from DB ─────────────────────────────────
         $currentPage = LengthAwarePaginator::resolveCurrentPage();
@@ -797,17 +799,7 @@ class AssetImportController extends Controller
         $invalidCount = $totalCount - $validCount;
 
         $perPage      = 50;
-        $allIds       = $baseQ->clone()->orderBy('id')->pluck('id')->toArray();
-        $invalidIds   = $baseQ->clone()->where('is_invalid', true)->orderBy('id')->pluck('id')->toArray();
-        $idToPosition = array_flip($allIds);
-        $invalidPages = [];
-        foreach ($invalidIds as $iId) {
-            $pos  = $idToPosition[$iId] ?? null;
-            if ($pos !== null) {
-                $page = (int) ceil(($pos + 1) / $perPage);
-                if (!in_array($page, $invalidPages)) $invalidPages[] = $page;
-            }
-        }
+        $invalidPages = $this->invalidPageNumbers($baseQ, $perPage);
 
         return response()->json([
             'success'      => true,
@@ -1001,19 +993,7 @@ class AssetImportController extends Controller
         $invalidCount = $totalCount - $validCount;
 
         $perPage      = 50;
-        $allIds       = $baseQ->clone()->orderBy('id')->pluck('id')->toArray();
-        $invalidIds   = $baseQ->clone()->where('is_invalid', true)->orderBy('id')->pluck('id')->toArray();
-        $idToPosition = array_flip($allIds);
-        $invalidPages = [];
-        foreach ($invalidIds as $iId) {
-            $pos  = $idToPosition[$iId] ?? null;
-            if ($pos !== null) {
-                $page = (int) ceil(($pos + 1) / $perPage);
-                if (!in_array($page, $invalidPages)) {
-                    $invalidPages[] = $page;
-                }
-            }
-        }
+        $invalidPages = $this->invalidPageNumbers($baseQ, $perPage);
 
         return response()->json([
             'success'      => true,
@@ -1030,15 +1010,66 @@ class AssetImportController extends Controller
      */
     public function cancel(Request $request)
     {
-        $userId = auth()->id();
+        $userId      = auth()->id();
+        $progressKey = 'import_progress_' . $userId;
 
-        // Signal cancellation in cache (background job will self-destruct)
-        Cache::put('import_progress_' . $userId, ['status' => 'cancelled'], 300);
+        // Signal cancellation in cache (background job will self-destruct).
+        //
+        // Carry the existing import_id across: the flag has to say *which* attempt
+        // was cancelled. Without it the record is indistinguishable from a fresh
+        // dispatch, and the job it was meant to stop would keep running. The
+        // counters are preserved too so the record keeps the same shape as every
+        // other writer — status() and the progress modal both read all five keys.
+        $current = Cache::get($progressKey);
+        $current = is_array($current) ? $current : [];
+
+        Cache::put($progressKey, [
+            'status'     => 'cancelled',
+            'percentage' => $current['percentage'] ?? 0,
+            'processed'  => $current['processed'] ?? 0,
+            'total'      => $current['total'] ?? 0,
+            'error'      => '',
+            'import_id'  => $current['import_id'] ?? null,
+        ], 1800);
 
         // We do NOT delete the temporary file here because the user
         // will reload/go back to the mapping page to do corrections,
         // and we need the file intact to allow them to re-apply the mapping.
 
         return response()->json(['success' => true]);
+    }
+
+    /**
+     * Page numbers (1-based) that contain at least one invalid staging row.
+     *
+     * Drives the red "heatmap" dots on the review paginator. Row position is
+     * defined by ORDER BY id, matching how review() slices its pages.
+     *
+     * This used to pull every staging id into PHP and array_flip() it — O(N)
+     * memory per request on a table sized for 100K+ row imports, and paid again
+     * on every single-cell auto-save. ROW_NUMBER() keeps the numbering in the
+     * database and returns only the handful of page numbers actually needed.
+     *
+     * @param  \Illuminate\Database\Query\Builder  $base  scoped to one user+property
+     * @return array<int, int>
+     */
+    private function invalidPageNumbers($base, int $perPage): array
+    {
+        // $perPage is an internal constant, never user input — inlined rather than
+        // bound so the sub-query's own bindings keep their position.
+        $perPage = max(1, (int) $perPage);
+
+        $numbered = $base->clone()
+            ->select('is_invalid')
+            ->selectRaw('ROW_NUMBER() OVER (ORDER BY id) AS rn');
+
+        return \DB::query()
+            ->fromSub($numbered, 't')
+            ->where('t.is_invalid', true)
+            ->selectRaw('DISTINCT FLOOR((t.rn - 1) / ' . $perPage . ') + 1 AS page')
+            ->orderBy('page')
+            ->pluck('page')
+            ->map(fn ($page) => (int) $page)
+            ->all();
     }
 }

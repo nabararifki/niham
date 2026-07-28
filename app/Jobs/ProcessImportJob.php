@@ -43,12 +43,14 @@ class ProcessImportJob implements ShouldQueue
      * @param string     $tempFilePath   Relative path within 'local' disk (e.g. "temp/import_xxx.xlsx")
      * @param array      $mappingPayload The full mapping payload from the frontend
      * @param int|string $selectedSheet  Sheet index or name
+     * @param string     $attemptId      Identifies this dispatch; see isCurrentAttempt()
      */
     public function __construct(
         public int $userId,
         public string $tempFilePath,
         public array $mappingPayload,
         public int|string $selectedSheet,
+        public string $attemptId,
     ) {}
 
     /**
@@ -60,10 +62,41 @@ class ProcessImportJob implements ShouldQueue
     }
 
     /**
-     * Update progress in cache.
+     * Whether this job is still the import the user is actually waiting on.
+     *
+     * The progress record is shared per user, so it doubles as the authority on
+     * which attempt is current: processMapping() stamps every dispatch with a
+     * fresh import_id, and cancel() flips the status. A job whose id no longer
+     * matches has been superseded by a newer upload.
+     *
+     * Superseded and cancelled jobs must touch nothing shared — not the progress
+     * record, not the staging table, and not the temp file, which the newer
+     * attempt may be reading from at this very moment.
+     */
+    private function isCurrentAttempt(): bool
+    {
+        $progress = Cache::get($this->progressKey());
+
+        if (! is_array($progress)) {
+            return false;
+        }
+
+        if (($progress['import_id'] ?? null) !== $this->attemptId) {
+            return false;
+        }
+
+        return ($progress['status'] ?? '') !== 'cancelled';
+    }
+
+    /**
+     * Update progress in cache. No-op once this attempt is no longer current.
      */
     private function setProgress(string $status, int $processed, int $total, string $error = ''): void
     {
+        if (! $this->isCurrentAttempt()) {
+            return;
+        }
+
         $percentage = $total > 0 ? min(100, (int) round(($processed / $total) * 100)) : 0;
 
         Cache::put($this->progressKey(), [
@@ -72,6 +105,7 @@ class ProcessImportJob implements ShouldQueue
             'processed'  => $processed,
             'total'      => $total,
             'error'      => $error,
+            'import_id'  => $this->attemptId,
         ], self::CACHE_TTL);
     }
 
@@ -92,39 +126,38 @@ class ProcessImportJob implements ShouldQueue
                 'trace'   => $e->getTraceAsString(),
             ]);
 
-            Cache::put($this->progressKey(), [
-                'status'     => 'failed',
-                'percentage' => 0,
-                'processed'  => 0,
-                'total'      => 0,
-                'error'      => $e->getMessage(),
-            ], self::CACHE_TTL);
+            $this->setProgress('failed', 0, 0, $e->getMessage());
         } finally {
-            // Cleanup temp file safely (use Storage so path is consistent)
-            try {
-                $currentProgress = Cache::get($this->progressKey());
-                $isCancelled = ($currentProgress && ($currentProgress['status'] ?? '') === 'cancelled');
-
-                if (!$isCancelled && Storage::disk('local')->exists($this->tempFilePath)) {
-                    Storage::disk('local')->delete($this->tempFilePath);
+            // Only the current attempt is allowed to clean up.
+            //
+            // A cancelled attempt deliberately keeps its temp file so the user can
+            // retry from the mapping page. A superseded attempt must keep it too,
+            // for a sharper reason: the newer import may be streaming that very
+            // same file (cancel → reload → re-submit the same mapping page reuses
+            // temp_file_path), and deleting it would break the live import.
+            // Whatever is left behind is swept hourly by app:clean-abandoned-imports.
+            if ($this->isCurrentAttempt()) {
+                try {
+                    if (Storage::disk('local')->exists($this->tempFilePath)) {
+                        Storage::disk('local')->delete($this->tempFilePath);
+                    }
+                } catch (\Throwable $cleanupErr) {
+                    Log::warning('Failed to cleanup temp file: ' . $cleanupErr->getMessage());
                 }
-            } catch (\Throwable $cleanupErr) {
-                Log::warning('Failed to cleanup temp file: ' . $cleanupErr->getMessage());
-            }
 
-            $currentProgress = Cache::get($this->progressKey());
-            if ($currentProgress && !in_array($currentProgress['status'] ?? '', ['completed', 'failed', 'cancelled'])) {
-                Log::warning('ProcessImportJob ended without terminal status. Forcing failed.', [
-                    'user_id' => $this->userId,
-                    'current' => $currentProgress,
-                ]);
-                Cache::put($this->progressKey(), [
-                    'status'     => 'failed',
-                    'percentage' => $currentProgress['percentage'] ?? 0,
-                    'processed'  => $currentProgress['processed'] ?? 0,
-                    'total'      => $currentProgress['total'] ?? 0,
-                    'error'      => 'Job ended unexpectedly without completion.',
-                ], self::CACHE_TTL);
+                $currentProgress = Cache::get($this->progressKey());
+                if (is_array($currentProgress) && !in_array($currentProgress['status'] ?? '', ['completed', 'failed'], true)) {
+                    Log::warning('ProcessImportJob ended without terminal status. Forcing failed.', [
+                        'user_id' => $this->userId,
+                        'current' => $currentProgress,
+                    ]);
+                    $this->setProgress(
+                        'failed',
+                        $currentProgress['processed'] ?? 0,
+                        $currentProgress['total'] ?? 0,
+                        'Job ended unexpectedly without completion.',
+                    );
+                }
             }
         }
     }
@@ -134,6 +167,19 @@ class ProcessImportJob implements ShouldQueue
      */
     private function processFile(): void
     {
+        // Stop before the destructive DELETE below. A job that was cancelled, or
+        // superseded by a newer upload, would otherwise wipe the staging rows of
+        // the import the user is actually waiting on — the delete runs first and
+        // used to be reached with no cancellation check in front of it at all.
+        if (! $this->isCurrentAttempt()) {
+            Log::info('ProcessImportJob skipped: attempt cancelled or superseded.', [
+                'user_id'    => $this->userId,
+                'attempt_id' => $this->attemptId,
+                'file'       => $this->tempFilePath,
+            ]);
+            return;
+        }
+
         if (!Storage::disk('local')->exists($this->tempFilePath)) {
             throw new \RuntimeException('Temporary import file not found: ' . $this->tempFilePath);
         }
@@ -265,9 +311,9 @@ class ProcessImportJob implements ShouldQueue
                     DB::table('temporary_asset_imports')->insert($resultsChunk);
                     $resultsChunk = [];
 
-                    // Cancellation check
-                    $currentStatus = Cache::get('import_progress_' . $this->userId);
-                    if (isset($currentStatus['status']) && $currentStatus['status'] === 'cancelled') {
+                    // Cancelled, or superseded by a newer upload → stop here.
+                    if (! $this->isCurrentAttempt()) {
+                        $reader->close();
                         return;
                     }
                     $this->setProgress('processing', $processedRows, $totalRows);
@@ -276,19 +322,21 @@ class ProcessImportJob implements ShouldQueue
             break;
         }
 
+        $reader->close();
+
+        // Re-check before the final flush. For any file smaller than one chunk the
+        // loop above never reaches a boundary, so this is the only cancellation
+        // checkpoint such an import gets — previously it had none, and cancelling
+        // a sub-500-row import silently imported it anyway.
+        if (! $this->isCurrentAttempt()) {
+            return;
+        }
+
         if (!empty($resultsChunk)) {
             DB::table('temporary_asset_imports')->insert($resultsChunk);
         }
 
-        $reader->close();
-
-        Cache::put($this->progressKey(), [
-            'status'     => 'completed',
-            'percentage' => 100,
-            'processed'  => $processedRows,
-            'total'      => $processedRows,
-            'error'      => '',
-        ], self::CACHE_TTL);
+        $this->setProgress('completed', $processedRows, $processedRows);
 
         Log::info('ProcessImportJob completed.', [
             'user_id'     => $this->userId,
