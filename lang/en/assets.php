@@ -39,7 +39,7 @@ return [
     'semicolon'                         => 'Semicolon',
     'live_preview'                      => 'Live Preview',
     'apply_mapping_continue'            => 'Apply Mapping & Continue',
-    'mapping_required_alert'            => 'Please map at least one column to a required field (Tag, Name, Category, Department, or Status).',
+    'mapping_required_alert'            => 'Please map at least one column to a required field (Tag, Name, Category, or Department).',
     'tag'                               => 'Tag',
     'name'                              => 'Name',
     'category'                          => 'Category',
@@ -114,6 +114,10 @@ return [
     'create_category'                   => 'Create Category',
     'duplicate_submission'              => 'That form was already submitted — nothing was saved twice.',
     'smart_importer_badge'              => 'SmartImporter',
+    // Smart Import help tooltips
+    'status_default_hint'               => 'Optional. Rows left blank or unmapped default to "In Service".',
+    'smart_import_help'                 => 'Auto-maps your columns and lets you review the data before saving. Works best with Tag, Asset Name and Category columns.',
+    'smart_import_help_department'      => 'Add Department too.',
 ];
 
 

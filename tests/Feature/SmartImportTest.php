@@ -95,6 +95,8 @@ class SmartImportTest extends TestCase
             'assets.large_file_warning', 'assets.review_data', 'assets.import_success',
             'assets.import_parse_error', 'assets.no_data_found',
             'assets.bulk_add_title', 'assets.bulk_add_desc',
+            'assets.status_default_hint', 'assets.smart_import_help',
+            'assets.smart_import_help_department', 'messages.model',
         ];
         foreach ($keys as $key) {
             $translated = __($key, ['message' => 'test']);
@@ -111,6 +113,8 @@ class SmartImportTest extends TestCase
             'assets.large_file_warning', 'assets.review_data', 'assets.import_success',
             'assets.import_parse_error', 'assets.no_data_found',
             'assets.bulk_add_title', 'assets.bulk_add_desc',
+            'assets.status_default_hint', 'assets.smart_import_help',
+            'assets.smart_import_help_department', 'messages.model',
         ];
         foreach ($keys as $key) {
             $translated = __($key, ['message' => 'test']);
@@ -1142,6 +1146,235 @@ class SmartImportTest extends TestCase
         $this->get(route('assets.import-review', ['page' => 1]))
             ->assertStatus(200)
             ->assertViewHas('invalidPages', [1, 2, 3]);
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // 7. MODEL FIELD PERSISTENCE (upload → mapping → staging → assets)
+    // ══════════════════════════════════════════════════════════════
+
+    /**
+     * A four-column CSV whose Category values match an existing category, so
+     * rapidAdd() can resolve the hint and storeBatch() will not skip the rows.
+     *
+     * @param  list<array{0:string,1:string,2:string,3:string}>  $rows  [tag, name, category, model]
+     */
+    private function seedImportFileWithModel(string $hexId, array $rows): string
+    {
+        $csv = "Tag,Name,Category,Model\n";
+        foreach ($rows as $row) {
+            $csv .= implode(',', $row) . "\n";
+        }
+
+        $path = 'temp/import_' . $hexId . '.csv';
+        \Illuminate\Support\Facades\Storage::disk('local')->put($path, $csv);
+
+        Cache::put('import_state_' . $this->userA->id, [
+            'temp_file_path'      => $path,
+            'sheets'              => ['Sheet1'],
+            'true_header'         => ['Tag', 'Name', 'Category', 'Model'],
+            'preview_data'        => [],
+            'mapping_proposals'   => [],
+            'current_sheet_index' => 0,
+        ], 1800);
+
+        return $path;
+    }
+
+    /** Mapping payload covering all four columns of seedImportFileWithModel(). */
+    private function mappingPayloadWithModel(string $tempFilePath): array
+    {
+        return [
+            'temp_file_path' => $tempFilePath,
+            'selected_sheet' => 0,
+            'mapping'        => [
+                'tag'      => ['columns' => ['Tag'], 'separator' => ' '],
+                'name'     => ['columns' => ['Name'], 'separator' => ' '],
+                'category' => ['columns' => ['Category'], 'separator' => ' '],
+                'model'    => ['columns' => ['Model'], 'separator' => ' '],
+            ],
+        ];
+    }
+
+    /**
+     * The headline regression test for the reported bug.
+     *
+     * Model was collected by the mapping UI, streamed into temporary_asset_imports
+     * correctly, and then silently dropped at the final INSERT INTO assets because
+     * storeBatch()'s insert array had no 'model' key (and the assets table had no
+     * such column). Every stage below is exercised through the real HTTP endpoints;
+     * the job runs inline because QUEUE_CONNECTION=sync in the test env.
+     */
+    public function test_model_survives_the_full_smart_import_pipeline(): void
+    {
+        $this->actingAs($this->userA);
+
+        $file = $this->seedImportFileWithModel('cafe01', [
+            ['M-1', 'Laptop One', 'Electronics A', 'Latitude 5540'],
+            ['M-2', 'Laptop Two', 'Electronics A', 'ThinkPad T14'],
+        ]);
+
+        // Upload → mapping → dispatch (job runs inline under the sync queue).
+        $this->postJson(route('assets.import.process-mapping'), [
+            'payload' => json_encode($this->mappingPayloadWithModel($file)),
+        ])->assertStatus(200);
+
+        // Staging already handled model correctly before this fix — assert it
+        // so a future regression here is distinguishable from one in storeBatch.
+        $staged = \DB::table('temporary_asset_imports')
+            ->where('user_id', $this->userA->id)
+            ->orderBy('id')
+            ->pluck('model')
+            ->toArray();
+        $this->assertSame(['Latitude 5540', 'ThinkPad T14'], $staged);
+
+        // Resolve the category hint into a real FK, then commit.
+        $this->get(route('assets.import-rapid-add'))
+            ->assertRedirect(route('assets.import-review'));
+
+        $this->postJson(route('assets.import-store-batch'), ['offset' => 0, 'limit' => 500])
+            ->assertStatus(200)
+            ->assertJson(['success' => true]);
+
+        $assets = Asset::where('property_id', $this->propertyA->id)->orderBy('tag')->get();
+
+        $this->assertCount(2, $assets);
+        $this->assertSame(
+            ['Latitude 5540', 'ThinkPad T14'],
+            $assets->pluck('model')->toArray(),
+            'The mapped Model value never reached assets.model — this is the reported bug.'
+        );
+    }
+
+    /**
+     * remarks used to double as the model's hiding place ('Imported. Model: X').
+     * Now that model has a real column, remarks must stay clean.
+     */
+    public function test_import_remarks_no_longer_smuggle_the_model_value(): void
+    {
+        $this->actingAs($this->userA);
+
+        $file = $this->seedImportFileWithModel('cafe02', [
+            ['M-3', 'Printer', 'Electronics A', 'LaserJet 4000'],
+        ]);
+
+        $this->postJson(route('assets.import.process-mapping'), [
+            'payload' => json_encode($this->mappingPayloadWithModel($file)),
+        ])->assertStatus(200);
+
+        $this->get(route('assets.import-rapid-add'));
+        $this->postJson(route('assets.import-store-batch'), ['offset' => 0, 'limit' => 500])
+            ->assertStatus(200);
+
+        $asset = Asset::where('tag', 'M-3')->firstOrFail();
+
+        $this->assertSame('LaserJet 4000', $asset->model);
+        $this->assertSame('Imported.', $asset->remarks);
+        $this->assertStringNotContainsString('Model:', (string) $asset->remarks);
+    }
+
+    /**
+     * updateSingleRow() already whitelisted 'model' as an editable staging column,
+     * but the edit was worthless while storeBatch() discarded the field.
+     */
+    public function test_model_edited_on_the_review_page_reaches_the_created_asset(): void
+    {
+        $this->actingAs($this->userA);
+
+        \DB::table('temporary_asset_imports')->insert([
+            'user_id'       => $this->userA->id,
+            'property_id'   => $this->propertyA->id,
+            'tag'           => 'EDIT-1',
+            'name'          => 'Monitor',
+            'category_id'   => $this->categoryA->id,
+            'department_id' => $this->departmentA->id,
+            'status'        => 'in_service',
+            'model'         => 'wrong model',
+            'is_invalid'    => false,
+            'created_at'    => now(),
+            'updated_at'    => now(),
+        ]);
+
+        $this->postJson(route('assets.import.update-row'), [
+            'absolute_index' => 0,
+            'field_name'     => 'model',
+            'new_value'      => 'UltraSharp U2723QE',
+        ])->assertStatus(200);
+
+        $this->postJson(route('assets.import-store-batch'), ['offset' => 0, 'limit' => 500])
+            ->assertStatus(200);
+
+        $this->assertSame(
+            'UltraSharp U2723QE',
+            Asset::where('tag', 'EDIT-1')->firstOrFail()->model
+        );
+    }
+
+    public function test_status_column_header_is_not_marked_required_on_the_review_page(): void
+    {
+        $this->actingAs($this->userA);
+
+        \DB::table('temporary_asset_imports')->insert([
+            'user_id'     => $this->userA->id,
+            'property_id' => $this->propertyA->id,
+            'tag'         => 'ST-1',
+            'name'        => 'Desk',
+            'category_id' => $this->categoryA->id,
+            'status'      => 'in_service',
+            'is_invalid'  => false,
+            'created_at'  => now(),
+            'updated_at'  => now(),
+        ]);
+
+        // Status defaults to in_service and is enforced nowhere, so the review
+        // grid must not advertise it as required.
+        $this->get(route('assets.import-review'))
+            ->assertStatus(200)
+            ->assertDontSee(__('assets.status') . ' *', false);
+    }
+
+    /**
+     * The upload-modal tooltip recommends a Department column only to users whose
+     * Department column would actually be honoured. ProcessImportJob discards the
+     * file's department outright for anyone without executive oversight
+     * (`'_department_hint' => !$isExecutive ? '' : ...`), so recommending it to a
+     * department-locked user would be misleading, not merely redundant.
+     */
+    public function test_upload_tooltip_mentions_department_only_for_executive_oversight_users(): void
+    {
+        $this->departmentA->update(['is_executive_oversight' => true]);
+        $this->actingAs($this->userA->fresh());
+
+        $this->get(route('assets.index'))
+            ->assertStatus(200)
+            ->assertSee(__('assets.smart_import_help'), false)
+            ->assertSee(__('assets.smart_import_help_department'), false);
+    }
+
+    public function test_upload_tooltip_omits_department_for_a_department_locked_user(): void
+    {
+        $this->departmentA->update(['is_executive_oversight' => false]);
+        $this->actingAs($this->userA->fresh());
+
+        $this->get(route('assets.index'))
+            ->assertStatus(200)
+            ->assertSee(__('assets.smart_import_help'), false)
+            ->assertDontSee(__('assets.smart_import_help_department'), false);
+    }
+
+    public function test_upload_tooltip_follows_the_active_locale(): void
+    {
+        $this->departmentA->update(['is_executive_oversight' => true]);
+        $this->actingAs($this->userA->fresh());
+
+        app()->setLocale('en');
+        $enText = __('assets.smart_import_help');
+        $this->get(route('assets.index'))->assertSee($enText, false);
+
+        app()->setLocale('id');
+        $idText = __('assets.smart_import_help');
+        $this->get(route('assets.index'))->assertSee($idText, false);
+
+        $this->assertNotEquals($enText, $idText, 'The tooltip must be genuinely translated, not hardcoded.');
     }
 }
 

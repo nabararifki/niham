@@ -46,6 +46,7 @@ class BackupImportLogicTest extends TestCase
             'department_id' => $deptA->id,
             'category_id' => $catA->id,
             'name' => 'MacBook Pro',
+            'model' => 'MacBookPro18,2',
         ]);
 
         Attachment::create([
@@ -98,6 +99,7 @@ class BackupImportLogicTest extends TestCase
 
         // Verify UUID relational integrity (local IDs change, UUID-based relationships are rebuilt)
         $this->assertEquals('MacBook Pro', $restoredAsset->name);
+        $this->assertEquals('MacBookPro18,2', $restoredAsset->model);
         $this->assertEquals('IT Dept', $restoredAsset->department->name);
         $this->assertEquals('Laptops', $restoredAsset->category->name);
 
@@ -110,6 +112,30 @@ class BackupImportLogicTest extends TestCase
 
         // Verify media physically extracted
         Storage::disk('public')->assertExists('attachments/macbook.pdf');
+    }
+
+    /**
+     * A second restore of the same backup takes the upsert's ON CONFLICT branch,
+     * which is driven by an explicit `update:` column list. A column missing from
+     * that list is inserted on first restore but silently never refreshed after —
+     * the same silent-drop class of bug as the missing assets.model column itself.
+     */
+    public function test_repeat_restore_refreshes_the_model_column()
+    {
+        $restoreService = new TenantRestoreService($this->propertyB, $this->backupZipPath);
+        $restoreService->restore();
+
+        $restored = Asset::where('property_id', $this->propertyB->id)->firstOrFail();
+        $restored->update(['model' => 'locally diverged']);
+
+        // Restoring the same backup again must bring the column back in line.
+        (new TenantRestoreService($this->propertyB, $this->backupZipPath))->restore();
+
+        $this->assertEquals(
+            'MacBookPro18,2',
+            $restored->fresh()->model,
+            'model is absent from the upsert update: list, so a repeat restore never refreshes it.'
+        );
     }
 
     public function test_restore_does_not_overwrite_target_property_code()

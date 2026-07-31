@@ -39,7 +39,7 @@ return [
     'semicolon'                         => 'Titik Koma',
     'live_preview'                      => 'Pratinjau Langsung',
     'apply_mapping_continue'            => 'Terapkan Pemetaan & Lanjutkan',
-    'mapping_required_alert'            => 'Harap petakan minimal satu kolom ke field yang diperlukan (Tag, Nama, Kategori, Departemen, atau Status).',
+    'mapping_required_alert'            => 'Harap petakan minimal satu kolom ke field yang diperlukan (Tag, Nama, Kategori, atau Departemen).',
     'tag'                               => 'Tag',
     'name'                              => 'Nama',
     'category'                          => 'Kategori',
@@ -114,6 +114,10 @@ return [
     'create_category'                   => 'Buat Kategori',
     'duplicate_submission'              => 'Formulir itu sudah dikirim — tidak ada data yang tersimpan dua kali.',
     'smart_importer_badge'              => 'SmartImporter',
+    // Smart Import help tooltips
+    'status_default_hint'               => 'Opsional. Baris yang kosong atau tidak dipetakan otomatis berstatus "In Service".',
+    'smart_import_help'                 => 'Memetakan kolom otomatis dan menampilkan pratinjau sebelum data disimpan. Paling baik dengan kolom Tag, Nama Aset, dan Kategori.',
+    'smart_import_help_department'      => 'Sertakan juga Departemen.',
 ];
 
 

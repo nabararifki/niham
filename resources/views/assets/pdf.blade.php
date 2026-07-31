@@ -47,6 +47,7 @@
                 <th>Department</th>
                 <th>Status</th>
                 <th>Serial Number</th>
+                <th>Model</th>
                 <th>Purchase<br>Date</th>
                 <th>Warranty<br>Date</th>
                 <th>Vendor</th>
@@ -63,6 +64,7 @@
                 <td style="width: 70px;">{{ $asset->department?->name ?? 'N/A' }}</td>
                 <td style="width: 60px;">{{ str_replace('_', ' ', ucfirst($asset->status)) }}</td>
                 <td style="width: 70px;">{{ $asset->serial_number }}</td>
+                <td style="width: 70px;">{{ $asset->model }}</td>
                 <td style="width: 60px;">{{ $asset->purchase_date ? $asset->purchase_date->format('Y-m-d') : 'N/A' }}</td>
                 <td style="width: 60px;">{{ $asset->warranty_date ? $asset->warranty_date->format('Y-m-d') : 'N/A' }}</td>
                 <td style="width: 80px;">{{ $asset->vendor }}</td>

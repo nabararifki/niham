@@ -55,6 +55,7 @@
                                     @endcan
                                 </div>
                                 <div><strong class="text-gray-900 dark:text-gray-100">{{ __('messages.serial_number') }}</strong> <span class="text-gray-700 dark:text-gray-300">{{ $asset->serial_number ?: '-' }}</span></div>
+                                <div><strong class="text-gray-900 dark:text-gray-100">{{ __('messages.model') }}</strong> <span class="text-gray-700 dark:text-gray-300">{{ $asset->model ?: '-' }}</span></div>
                             </div>
 
                             <div class="space-y-3 pt-4 md:pt-0 border-t md:border-none border-gray-200/50 dark:border-gray-700">

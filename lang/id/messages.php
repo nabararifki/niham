@@ -399,6 +399,7 @@ return [
     'password_leave_blank_if_unchanged' => 'Kata Sandi (biarkan kosong jika tidak diubah)',
     'no_image_available' => 'Tidak Ada Gambar Tersedia',
     'serial_number' => 'Nomor Seri',
+    'model' => 'Model',
     'purchase_date' => 'Tanggal Pembelian',
     'warranty_status' => 'Status Garansi:',
     'expired' => 'Kedaluwarsa',

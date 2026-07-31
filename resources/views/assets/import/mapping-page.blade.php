@@ -115,6 +115,26 @@
                                 <template x-if="field.required">
                                     <span class="text-red-500">*</span>
                                 </template>
+                                {{-- Status is optional: an unmapped or blank cell falls back to
+                                     'in_service' in ProcessImportJob. Say so, rather than leaving
+                                     users to guess what happens when they skip it.
+
+                                     CSS-only tooltip (group-hover), not the native title attribute:
+                                     title= is unreliable over an inline <svg>, waits ~1s, and cannot
+                                     be styled. Pure CSS also survives being cloned by <template x-if>,
+                                     which a JS-driven tooltip would need extra wiring for. Opens
+                                     downward so it is never clipped by an ancestor's overflow. --}}
+                                <template x-if="field.id === 'status'">
+                                    <span tabindex="0" class="relative inline-flex items-center group cursor-help focus:outline-none">
+                                        <svg class="w-3.5 h-3.5 text-gray-400 group-hover:text-accent group-focus:text-accent transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                                        </svg>
+                                        <span role="tooltip"
+                                              class="pointer-events-none absolute top-full left-0 mt-2 z-50 w-56 rounded-lg bg-gray-900 dark:bg-gray-700 px-3 py-2 text-xs font-normal normal-case text-left text-white shadow-xl ring-1 ring-black/10 opacity-0 invisible transition-opacity duration-150 group-hover:opacity-100 group-hover:visible group-focus:opacity-100 group-focus:visible">
+                                            {{ __('assets.status_default_hint') }}
+                                        </span>
+                                    </span>
+                                </template>
                             </h3>
 
                         </div>
@@ -386,7 +406,7 @@
                     { id: 'name', label: '{{ __('assets.name') ?? "Name" }}', required: true },
                     { id: 'category', label: '{{ __('assets.category') ?? "Category" }}', required: true },
                     { id: 'department', label: '{{ __('assets.department') ?? "Department" }}', required: true },
-                    { id: 'status', label: '{{ __('assets.status') ?? "Status" }}', required: true },
+                    { id: 'status', label: '{{ __('assets.status') ?? "Status" }}', required: false },
                     { id: 'model', label: '{{ __('assets.model') ?? "Model" }}', required: false },
                     { id: 'serial_number', label: '{{ __('assets.serial_number') ?? "Serial Number" }}', required: false },
                     { id: 'purchase_date', label: '{{ __('assets.purchase_date') ?? "Purchase Date" }}', required: false },

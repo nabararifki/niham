@@ -596,4 +596,86 @@ class BulkManualEntryTest extends TestCase
             'An in-progress Smart Import session must survive a manual bulk save.'
         );
     }
+
+    // ══════════════════════════════════════════════════════════════
+    // 5. MODEL FIELD (the grid always collected it; nothing stored it)
+    // ══════════════════════════════════════════════════════════════
+
+    /**
+     * The grid has always rendered a Model/Brand input posting assets[i][model],
+     * but store()'s insert array had no 'model' key and assets had no such column,
+     * so the value was discarded on every save.
+     */
+    public function test_model_typed_into_the_grid_is_persisted(): void
+    {
+        $this->actingAs($this->userA);
+
+        $this->post(route('assets.bulk-manual.store'), [
+            'assets' => [$this->row([
+                'tag' => 'MOD-001',
+                'name' => 'Projector',
+                'model' => 'EB-2250U',
+            ])],
+        ])->assertRedirect();
+
+        $this->assertSame(
+            'EB-2250U',
+            Asset::withoutGlobalScopes()->where('tag', 'MOD-001')->firstOrFail()->model,
+            'The Model value typed into the grid never reached assets.model.'
+        );
+    }
+
+    public function test_blank_model_is_stored_as_null_not_empty_string(): void
+    {
+        $this->actingAs($this->userA);
+
+        $this->post(route('assets.bulk-manual.store'), [
+            'assets' => [$this->row(['tag' => 'MOD-002', 'name' => 'No Model', 'model' => ''])],
+        ])->assertRedirect();
+
+        $this->assertNull(Asset::withoutGlobalScopes()->where('tag', 'MOD-002')->firstOrFail()->model);
+    }
+
+    /**
+     * remarks used to be the model's hiding place ('Imported. Model: X') because
+     * there was nowhere else to put it. That workaround is gone.
+     */
+    public function test_remarks_no_longer_smuggle_the_model_value(): void
+    {
+        $this->actingAs($this->userA);
+
+        $this->post(route('assets.bulk-manual.store'), [
+            'assets' => [$this->row([
+                'tag' => 'MOD-003',
+                'name' => 'Router',
+                'model' => 'RB5009UG',
+            ])],
+        ])->assertRedirect();
+
+        $asset = Asset::withoutGlobalScopes()->where('tag', 'MOD-003')->firstOrFail();
+
+        $this->assertSame('RB5009UG', $asset->model);
+        $this->assertSame('Imported.', $asset->remarks);
+    }
+
+    /**
+     * model, serial_number, purchase_date, purchase_cost and remarks all reach
+     * DB::table()->insert() directly. Without a rule an over-long value produced a
+     * raw SQL error (500) rather than a validation response.
+     */
+    public function test_over_long_optional_fields_fail_validation_instead_of_erroring(): void
+    {
+        $this->actingAs($this->userA);
+
+        $this->post(route('assets.bulk-manual.store'), [
+            'assets' => [$this->row([
+                'tag' => 'MOD-004',
+                'name' => 'Too Long',
+                'model' => str_repeat('x', 256),
+                'serial_number' => str_repeat('y', 256),
+            ])],
+        ])->assertSessionHasErrors(['assets.0.model', 'assets.0.serial_number']);
+
+        $this->assertEquals(0, Asset::withoutGlobalScopes()->where('tag', 'MOD-004')->count());
+    }
 }

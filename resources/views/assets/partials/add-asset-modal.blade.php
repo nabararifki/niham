@@ -79,7 +79,41 @@
                                   x-ref="uploaderRoot">
                                  
                                  <div class="mt-4 mb-4">
-                                     <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">{{ __('assets.upload_prompt') }}</label>
+                                     {{-- The Department sentence is conditional on hasExecutiveOversight():
+                                          ProcessImportJob discards the file's Department column outright for
+                                          anyone without it (`'_department_hint' => !$isExecutive ? '' : ...`)
+                                          and stamps the importer's own department instead, so suggesting the
+                                          column to a department-locked user would be actively misleading. --}}
+                                     {{-- Teleported to <body> rather than positioned inside this label.
+                                          Two ancestors clip it otherwise: the modal panel (max-w-lg
+                                          overflow-hidden) and this accordion (overflow-hidden, plus
+                                          x-collapse manipulating overflow). Same escape hatch the
+                                          existing <x-hover-card> uses. z is above the modal's z-[100].
+                                          Not the native title attribute: it is unreliable over an
+                                          inline <svg>, waits ~1s, and cannot be styled. --}}
+                                     <div class="flex items-center gap-1.5 mb-2">
+                                         <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">{{ __('assets.upload_prompt') }}</label>
+                                         <span tabindex="0"
+                                               class="relative inline-flex items-center cursor-help focus:outline-none"
+                                               x-data="{ tip: false, tx: 0, ty: 0 }"
+                                               @mouseenter="tip = true; tx = $event.clientX; ty = $event.clientY"
+                                               @mousemove="tx = $event.clientX; ty = $event.clientY"
+                                               @mouseleave="tip = false"
+                                               @focus="tip = true; tx = $el.getBoundingClientRect().left; ty = $el.getBoundingClientRect().bottom"
+                                               @blur="tip = false">
+                                             <x-heroicon-o-question-mark-circle class="w-4 h-4 text-gray-400 hover:text-emerald-500 transition-colors" />
+                                             <template x-teleport="body">
+                                                 <div role="tooltip"
+                                                      x-show="tip"
+                                                      x-cloak
+                                                      x-transition.opacity.duration.150ms
+                                                      class="fixed z-[300] w-64 max-w-[calc(100vw-2rem)] rounded-lg bg-gray-900 dark:bg-gray-700 px-3 py-2 text-xs font-normal normal-case text-left leading-relaxed text-white shadow-2xl ring-1 ring-black/10 pointer-events-none"
+                                                      :style="`top: ${ty + 18}px; left: ${Math.min(tx + 12, window.innerWidth - 272)}px;`">
+                                                     {{ __('assets.smart_import_help') }}@if (Auth::user()->hasExecutiveOversight()) {{ __('assets.smart_import_help_department') }}@endif
+                                                 </div>
+                                             </template>
+                                         </span>
+                                     </div>
                                      <input type="file" x-ref="fileInput" accept=".csv,.xlsx" required
                                          @change="onFileSelect($event)"
                                          class="block w-full text-sm text-gray-700 dark:text-gray-200 file:mr-3 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:uppercase file:tracking-wider file:bg-emerald-100 file:dark:bg-emerald-900/40 file:text-emerald-700 file:dark:text-emerald-400 hover:file:bg-emerald-200 dark:hover:file:bg-emerald-900/60 file:cursor-pointer file:transition-colors border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-900/50 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500" />

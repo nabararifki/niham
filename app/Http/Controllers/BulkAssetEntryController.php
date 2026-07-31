@@ -115,6 +115,13 @@ class BulkAssetEntryController extends Controller
             'assets.*.category_id'   => 'required|integer',
             'assets.*.department_id' => 'nullable|integer',
             'assets.*.status'        => 'required|in:in_service,out_of_service,disposed',
+            // These reach DB::table()->insert() unfiltered, so an over-long value
+            // used to surface as a raw SQL error rather than a validation message.
+            'assets.*.model'         => 'nullable|string|max:255',
+            'assets.*.serial_number' => 'nullable|string|max:255',
+            'assets.*.purchase_date' => 'nullable|string|max:32',
+            'assets.*.purchase_cost' => 'nullable|numeric',
+            'assets.*.remarks'       => 'nullable|string|max:120',
         ]);
 
         $editorId   = auth()->id();
@@ -141,10 +148,11 @@ class BulkAssetEntryController extends Controller
             if (!isset($validCategoryIds[$catId])) continue;
             if ($deptId && !isset($validDepartmentIds[$deptId])) $deptId = null;
 
-            $tag     = !empty($item['tag']) ? $item['tag'] : ('AST-' . strtoupper(substr(uniqid(), -6)));
-            $remarks = !empty($item['remarks'])
-                ? $item['remarks']
-                : (!empty($item['model']) ? 'Imported. Model: ' . $item['model'] : 'Imported.');
+            $tag = !empty($item['tag']) ? $item['tag'] : ('AST-' . strtoupper(substr(uniqid(), -6)));
+
+            // model used to be smuggled in here ('Imported. Model: X') because
+            // assets had no model column. It has one now, so remarks stays clean.
+            $remarks = !empty($item['remarks']) ? $item['remarks'] : 'Imported.';
             if (strlen($remarks) > 120) $remarks = substr($remarks, 0, 117) . '...';
 
             $insertRows[] = [
@@ -155,6 +163,7 @@ class BulkAssetEntryController extends Controller
                 'department_id' => $deptId,
                 'status'        => $item['status'] ?? 'in_service',
                 'serial_number' => $item['serial_number'] ?? null,
+                'model'         => $item['model'] ?? null,
                 'purchase_date' => $this->sanitizeDate($item['purchase_date'] ?? null),
                 'purchase_cost' => is_numeric($item['purchase_cost'] ?? '') ? $item['purchase_cost'] : null,
                 'remarks'       => $remarks,

@@ -335,6 +335,19 @@
                                 <x-input-error :messages="$errors->get('serial_number')" class="mt-2" />
                             </div>
 
+                            <!-- Model -->
+                            <div>
+                                <x-input-label for="model" :value="__('messages.model')" />
+                                <x-text-input
+                                    id="model"
+                                    name="model"
+                                    type="text"
+                                    class="mt-1 block w-full"
+                                    value="{{ old('model', $asset->model) }}"
+                                />
+                                <x-input-error :messages="$errors->get('model')" class="mt-2" />
+                            </div>
+
                             <!-- Purchase Date -->
                             <div>
                                 <x-input-label for="purchase_date" :value="__('messages.purchase_date')" />

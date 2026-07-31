@@ -22,6 +22,7 @@ class Asset extends Model
         'location_id',
         'status',
         'serial_number',
+        'model',
         'purchase_date',
         'warranty_date',
         'purchase_cost',

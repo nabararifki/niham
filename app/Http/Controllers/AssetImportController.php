@@ -881,10 +881,11 @@ class AssetImportController extends Controller
 
                 if (!$catId) continue; // category_id is required — skip rows with cross-tenant FK
 
-                $tag     = !empty($row->tag) ? $row->tag : ('AST-' . strtoupper(substr(uniqid(), -6)));
-                $remarks = !empty($row->remarks)
-                    ? $row->remarks
-                    : (!empty($row->model) ? 'Imported. Model: ' . $row->model : 'Imported.');
+                $tag = !empty($row->tag) ? $row->tag : ('AST-' . strtoupper(substr(uniqid(), -6)));
+
+                // model used to be smuggled in here ('Imported. Model: X') because
+                // assets had no model column. It has one now, so remarks stays clean.
+                $remarks = !empty($row->remarks) ? $row->remarks : 'Imported.';
                 if (strlen($remarks) > 120) $remarks = substr($remarks, 0, 117) . '...';
 
                 $insertRows[] = [
@@ -895,6 +896,7 @@ class AssetImportController extends Controller
                     'department_id' => $deptId,
                     'status'        => $row->status ?? 'in_service',
                     'serial_number' => $row->serial_number ?: null,
+                    'model'         => $row->model ?: null,
                     'purchase_date' => $this->sanitizeDate($row->purchase_date),
                     'purchase_cost' => is_numeric($row->purchase_cost ?? '') ? $row->purchase_cost : null,
                     'remarks'       => $remarks,

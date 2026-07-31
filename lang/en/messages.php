@@ -399,6 +399,7 @@ return [
     'password_leave_blank_if_unchanged' => 'Password (leave blank if unchanged)',
     'no_image_available' => 'No Image Available',
     'serial_number' => 'Serial Number',
+    'model' => 'Model',
     'purchase_date' => 'Purchase Date',
     'warranty_status' => 'Warranty Status:',
     'expired' => 'Expired',

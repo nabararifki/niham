@@ -340,7 +340,7 @@ class TenantRestoreService
                 uniqueBy: ['uuid'],
                 update: [
                     'tag', 'name', 'category_id', 'department_id', 'status',
-                    'serial_number', 'purchase_date', 'warranty_date', 'purchase_cost',
+                    'serial_number', 'model', 'purchase_date', 'warranty_date', 'purchase_cost',
                     'vendor', 'desc', 'remarks', 'deleted_at', 'property_id', 'updated_at',
                 ],
             );
