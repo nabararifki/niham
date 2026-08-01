@@ -131,7 +131,12 @@
                                             $globalIndex = $pageOffset + $localIndex;
                                             $combined    = trim(($item['brand'] ?? '') . ' ' . ($item['model'] ?? ''));
                                         @endphp
-                                        <tr x-data="{ isInvalid: {{ ($item['is_invalid'] ?? false) ? 'true' : 'false' }} }"
+                                        {{-- data-row-id is the DOM handle (a future multi-select can
+                                             query [data-row-id]); rowId in the scope is what the
+                                             edit/delete handlers read. Declared once per row so the
+                                             two can never disagree. --}}
+                                        <tr data-row-id="{{ $item['id'] }}"
+                                            x-data="{ rowId: {{ (int) $item['id'] }}, isInvalid: {{ ($item['is_invalid'] ?? false) ? 'true' : 'false' }} }"
                                             :class="isInvalid ? 'bg-red-50 dark:bg-red-900/20 border-l-4 border-error' : 'hover:bg-gray-50/50 dark:hover:bg-gray-700/30'"
                                             class="transition-colors">
                                             {{-- Row number --}}
@@ -145,7 +150,7 @@
                                                        name="assets[{{ $localIndex }}][tag]"
                                                        value="{{ old('assets.'.$localIndex.'.tag', $item['tag'] ?? ('AST-' . strtoupper(\Str::random(6)))) }}"
                                                        required
-                                                       @input.debounce.500ms="autoSave({{ $globalIndex }}, 'tag', $event.target.value, $data)"
+                                                       @input.debounce.500ms="autoSave('tag', $event.target.value, $data)"
                                                        class="block w-32 border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:ring-accent focus:border-accent text-xs dark:bg-gray-900/50 dark:text-white" />
                                             </td>
 
@@ -155,14 +160,14 @@
                                                        name="assets[{{ $localIndex }}][name]"
                                                        value="{{ old('assets.'.$localIndex.'.name', $item['name'] ?? '') }}"
                                                        required
-                                                       @input.debounce.500ms="autoSave({{ $globalIndex }}, 'name', $event.target.value, $data)"
+                                                       @input.debounce.500ms="autoSave('name', $event.target.value, $data)"
                                                        class="block w-40 border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:ring-accent focus:border-accent text-xs dark:bg-gray-900/50 dark:text-white" />
                                             </td>
 
                                             {{-- Category — uses pre-fetched $categories collection, ZERO DB queries --}}
                                             <td class="px-2 py-2.5 whitespace-nowrap">
                                                 <select name="assets[{{ $localIndex }}][category_id]"
-                                                        @change="autoSave({{ $globalIndex }}, 'category_id', $event.target.value, $data)"
+                                                        @change="autoSave('category_id', $event.target.value, $data)"
                                                         class="block w-36 border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:ring-accent focus:border-accent text-xs dark:bg-gray-900/50 dark:text-white">
                                                     <option value="">{{ __('assets.select_placeholder') }}</option>
                                                     @foreach($categories as $cat)
@@ -177,7 +182,7 @@
                                             {{-- Department — uses pre-fetched $departments collection, ZERO DB queries --}}
                                             <td class="px-2 py-2.5 whitespace-nowrap">
                                                 <select name="assets[{{ $localIndex }}][department_id]"
-                                                        @change="autoSave({{ $globalIndex }}, 'department_id', $event.target.value, $data)"
+                                                        @change="autoSave('department_id', $event.target.value, $data)"
                                                         class="block w-36 border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:ring-accent focus:border-accent text-xs dark:bg-gray-900/50 dark:text-white">
                                                     <option value="">{{ __('assets.select_placeholder') }}</option>
                                                     @foreach($departments as $dept)
@@ -193,7 +198,7 @@
                                             <td class="px-2 py-2.5 whitespace-nowrap">
                                                 <select name="assets[{{ $localIndex }}][status]"
                                                         required
-                                                        @change="autoSave({{ $globalIndex }}, 'status', $event.target.value, $data)"
+                                                        @change="autoSave('status', $event.target.value, $data)"
                                                         class="block w-32 border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:ring-accent focus:border-accent text-xs dark:bg-gray-900/50 dark:text-white">
                                                     <option value="in_service"    {{ old('assets.'.$localIndex.'.status', $item['status'] ?? '') == 'in_service'    ? 'selected' : '' }}>{{ __('assets.in_service') }}</option>
                                                     <option value="out_of_service"{{ old('assets.'.$localIndex.'.status', $item['status'] ?? '') == 'out_of_service' ? 'selected' : '' }}>{{ __('assets.out_of_service') }}</option>
@@ -206,7 +211,7 @@
                                                 <input type="text"
                                                        name="assets[{{ $localIndex }}][model]"
                                                        value="{{ old('assets.'.$localIndex.'.model', $combined) }}"
-                                                       @input.debounce.500ms="autoSave({{ $globalIndex }}, 'model', $event.target.value, $data)"
+                                                       @input.debounce.500ms="autoSave('model', $event.target.value, $data)"
                                                        class="block w-32 border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:ring-accent focus:border-accent text-xs dark:bg-gray-900/50 dark:text-white" />
                                             </td>
 
@@ -215,7 +220,7 @@
                                                 <input type="text"
                                                        name="assets[{{ $localIndex }}][serial_number]"
                                                        value="{{ old('assets.'.$localIndex.'.serial_number', $item['serial_number'] ?? '') }}"
-                                                       @input.debounce.500ms="autoSave({{ $globalIndex }}, 'serial_number', $event.target.value, $data)"
+                                                       @input.debounce.500ms="autoSave('serial_number', $event.target.value, $data)"
                                                        class="block w-32 border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:ring-accent focus:border-accent text-xs dark:bg-gray-900/50 dark:text-white" />
                                             </td>
 
@@ -224,7 +229,7 @@
                                                 <input type="date"
                                                        name="assets[{{ $localIndex }}][purchase_date]"
                                                        value="{{ old('assets.'.$localIndex.'.purchase_date', $item['purchase_date'] ?? '') }}"
-                                                       @change="autoSave({{ $globalIndex }}, 'purchase_date', $event.target.value, $data)"
+                                                       @change="autoSave('purchase_date', $event.target.value, $data)"
                                                        class="block w-36 border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:ring-accent focus:border-accent text-xs dark:bg-gray-900/50 dark:text-white" />
                                             </td>
 
@@ -234,7 +239,7 @@
                                                        step="any"
                                                        name="assets[{{ $localIndex }}][purchase_cost]"
                                                        value="{{ old('assets.'.$localIndex.'.purchase_cost', $item['purchase_cost'] ?? '') }}"
-                                                       @input.debounce.500ms="autoSave({{ $globalIndex }}, 'purchase_cost', $event.target.value, $data)"
+                                                       @input.debounce.500ms="autoSave('purchase_cost', $event.target.value, $data)"
                                                        class="block w-28 border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:ring-accent focus:border-accent text-xs dark:bg-gray-900/50 dark:text-white" />
                                             </td>
 
@@ -243,14 +248,14 @@
                                                 <input type="text"
                                                        name="assets[{{ $localIndex }}][remarks]"
                                                        value="{{ old('assets.'.$localIndex.'.remarks', $item['remarks'] ?? '') }}"
-                                                       @input.debounce.500ms="autoSave({{ $globalIndex }}, 'remarks', $event.target.value, $data)"
+                                                       @input.debounce.500ms="autoSave('remarks', $event.target.value, $data)"
                                                        class="block w-40 border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:ring-accent focus:border-accent text-xs dark:bg-gray-900/50 dark:text-white" />
                                             </td>
 
                                             {{-- Action (Delete row via AJAX, confirmed through delete_row_modal) --}}
                                             <td class="px-2 py-2.5 whitespace-nowrap text-center">
                                                 <button type="button"
-                                                        @click="requestDeleteRow({{ $globalIndex }}, $data)"
+                                                        @click="requestDeleteRow($data)"
                                                         class="text-red-500 hover:text-red-700 dark:hover:text-red-400 transition-colors p-1.5 bg-red-50 dark:bg-red-900/20 rounded-lg"
                                                         title="{{ __('assets.action') }}">
                                                     <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
@@ -432,7 +437,7 @@
                 invalidCount: config.invalidCount || 0,
                 invalidPages: config.invalidPages || [],
                 totalRows: config.total || 0,
-                pendingDeleteIndex: null,
+                pendingDeleteRowId: null,
                 pendingDeleteScope: null,
 
                 get validText() {
@@ -446,24 +451,24 @@
                 // Opens delete_row_modal instead of the browser's native confirm() —
                 // confirm() can't be styled or localized through Blade at all, which is
                 // why it was stuck showing hardcoded Indonesian regardless of locale.
-                requestDeleteRow(absoluteIndex, trScope) {
-                    this.pendingDeleteIndex = absoluteIndex;
+                requestDeleteRow(trScope) {
+                    this.pendingDeleteRowId = trScope.rowId;
                     this.pendingDeleteScope = trScope;
                     document.getElementById('delete_row_modal').showModal();
                 },
 
                 cancelDeleteRow() {
                     document.getElementById('delete_row_modal').close();
-                    this.pendingDeleteIndex = null;
+                    this.pendingDeleteRowId = null;
                     this.pendingDeleteScope = null;
                 },
 
                 async confirmDeleteRow() {
                     document.getElementById('delete_row_modal').close();
-                    const absoluteIndex = this.pendingDeleteIndex;
-                    this.pendingDeleteIndex = null;
+                    const rowId = this.pendingDeleteRowId;
+                    this.pendingDeleteRowId = null;
                     this.pendingDeleteScope = null;
-                    if (absoluteIndex === null) return;
+                    if (!rowId) return;
 
                     try {
                         const response = await fetch('{{ route("assets.import.delete-row") }}', {
@@ -475,7 +480,7 @@
                                 'Accept': 'application/json'
                             },
                             body: JSON.stringify({
-                                absolute_index: absoluteIndex
+                                row_id: rowId
                             })
                         });
 
@@ -490,7 +495,9 @@
                             this.totalRows = data.totalCount;
                             this.invalidPages = data.invalidPages;
 
-                            // Reload page so pagination and DOM indices align perfectly with database
+                            // Reload so the # column and pagination re-settle. Row identity
+                            // no longer depends on this — every row carries its own id —
+                            // but the displayed numbering does.
                             window.location.reload();
                         }
                     } catch (err) {
@@ -506,7 +513,7 @@
                     }
                 },
 
-                async autoSave(absoluteIndex, fieldName, newValue, trScope) {
+                async autoSave(fieldName, newValue, trScope) {
                     try {
                         const response = await fetch('{{ route("assets.import.update-row") }}', {
                             method: 'POST',
@@ -517,7 +524,7 @@
                                 'Accept': 'application/json'
                             },
                             body: JSON.stringify({
-                                absolute_index: absoluteIndex,
+                                row_id: trScope.rowId,
                                 field_name: fieldName,
                                 new_value: newValue
                             })

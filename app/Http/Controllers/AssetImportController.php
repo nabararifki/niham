@@ -765,9 +765,15 @@ class AssetImportController extends Controller
      * AJAX: Persist a single cell edit from the review table into the staging row.
      *
      * The review page sends edits as they happen (auto-save). This method
-     * locates the staging row by its 0-based insert order, applies the update,
+     * locates the staging row by its primary key, applies the update,
      * recalculates the row's is_invalid flag, and returns updated global
      * counts + heatmap page list so the frontend can refresh without a reload.
+     *
+     * Rows are addressed by id, never by position. Position was ambiguous the
+     * moment anything before it was deleted: a debounced auto-save still holding
+     * its pre-delete index would silently write to whichever row had shifted into
+     * that slot. Since the id now arrives from the client, the user_id +
+     * property_id predicates below are what keep it in-tenant.
      *
      * The field_name input is validated against a whitelist before being used
      * as a column name to prevent SQL injection.
@@ -775,9 +781,9 @@ class AssetImportController extends Controller
     public function updateSingleRow(Request $request)
     {
         $request->validate([
-            'absolute_index' => 'required|integer|min:0',
-            'field_name'     => 'required|string',
-            'new_value'      => 'nullable|string',
+            'row_id'     => 'required|integer|min:1',
+            'field_name' => 'required|string',
+            'new_value'  => 'nullable|string',
         ]);
 
         $fieldName = $request->input('field_name');
@@ -817,13 +823,14 @@ class AssetImportController extends Controller
             }
         }
 
-        // Locate the staging row by its 0-based insertion order (ORDER BY id OFFSET n).
-        $absoluteIndex = (int) $request->input('absolute_index');
-        $stagingRow    = \DB::table('temporary_asset_imports')
+        // Locate the staging row by primary key, scoped to the caller's tenant.
+        // An id owned by another user or property simply misses and falls into
+        // the same 'Row not found' below that a stale id gets, so the response
+        // can't be used to probe whether a foreign id exists.
+        $stagingRow = \DB::table('temporary_asset_imports')
+            ->where('id', (int) $request->input('row_id'))
             ->where('user_id', $userId)
             ->where('property_id', $propertyId)
-            ->orderBy('id')
-            ->skip($absoluteIndex)
             ->first();
 
         if (!$stagingRow) {
@@ -1015,11 +1022,14 @@ class AssetImportController extends Controller
 
     /**
      * AJAX: Delete a single staging row from temporary_asset_imports database table.
+     *
+     * Addressed by id rather than page position, for the same reason as
+     * updateSingleRow() — see the note on that method.
      */
     public function deleteRow(Request $request)
     {
         $request->validate([
-            'absolute_index' => 'required|integer|min:0',
+            'row_id' => 'required|integer|min:1',
         ]);
 
         $userId     = auth()->id();
@@ -1031,12 +1041,10 @@ class AssetImportController extends Controller
             return response()->json(['success' => false, 'message' => 'No active property.'], 403);
         }
 
-        $absoluteIndex = (int) $request->input('absolute_index');
-        $stagingRow    = \DB::table('temporary_asset_imports')
+        $stagingRow = \DB::table('temporary_asset_imports')
+            ->where('id', (int) $request->input('row_id'))
             ->where('user_id', $userId)
             ->where('property_id', $propertyId)
-            ->orderBy('id')
-            ->skip($absoluteIndex)
             ->first();
 
         if (!$stagingRow) {

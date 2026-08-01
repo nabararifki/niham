@@ -715,11 +715,13 @@ class SmartImportTest extends TestCase
             ],
         ]);
 
-        // Submit auto-save edit to fix the name of the row (absolute_index=0)
+        $rowId = \DB::table('temporary_asset_imports')->value('id');
+
+        // Submit auto-save edit to fix the name of the row
         $response = $this->postJson(route('assets.import.update-row'), [
-            'absolute_index' => 0,
-            'field_name'     => 'name',
-            'new_value'      => 'Now Valid Name',
+            'row_id'     => $rowId,
+            'field_name' => 'name',
+            'new_value'  => 'Now Valid Name',
         ]);
 
         $response->assertStatus(200);
@@ -835,9 +837,10 @@ class SmartImportTest extends TestCase
         // Assert they both exist in DB
         $this->assertEquals(2, \DB::table('temporary_asset_imports')->where('user_id', $this->userA->id)->count());
 
-        // Call the delete-row endpoint to delete the first row (absolute_index = 0)
+        // Call the delete-row endpoint to delete the row tagged TAG-A
+        $firstRowId = \DB::table('temporary_asset_imports')->where('tag', 'TAG-A')->value('id');
         $response = $this->postJson(route('assets.import.delete-row'), [
-            'absolute_index' => 0,
+            'row_id' => $firstRowId,
         ]);
 
         $response->assertStatus(200);
@@ -848,7 +851,7 @@ class SmartImportTest extends TestCase
             'invalidCount' => 1,
         ]);
 
-        // Assert only the second row remains (which had index 1, now index 0)
+        // Assert only the second row remains
         $remaining = \DB::table('temporary_asset_imports')->where('user_id', $this->userA->id)->get();
         $this->assertCount(1, $remaining);
         $this->assertEquals('TAG-B', $remaining[0]->tag);
@@ -1297,9 +1300,9 @@ class SmartImportTest extends TestCase
         ]);
 
         $this->postJson(route('assets.import.update-row'), [
-            'absolute_index' => 0,
-            'field_name'     => 'model',
-            'new_value'      => 'UltraSharp U2723QE',
+            'row_id'     => \DB::table('temporary_asset_imports')->value('id'),
+            'field_name' => 'model',
+            'new_value'  => 'UltraSharp U2723QE',
         ])->assertStatus(200);
 
         $this->postJson(route('assets.import-store-batch'), ['offset' => 0, 'limit' => 500])
@@ -1796,6 +1799,132 @@ class SmartImportTest extends TestCase
             __('assets.possible_solutions', [], 'en'),
             __('assets.possible_solutions', [], 'id')
         );
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // 10. STAGING ROW IDENTITY (edit/delete target by ID, not position)
+    // ══════════════════════════════════════════════════════════════
+
+    /**
+     * Seed three staging rows for userA and return their real IDs keyed by letter.
+     */
+    private function seedThreeStagingRows(): array
+    {
+        $ids = [];
+
+        foreach (['A', 'B', 'C'] as $letter) {
+            $ids[$letter] = \DB::table('temporary_asset_imports')->insertGetId([
+                'user_id' => $this->userA->id,
+                'property_id' => $this->propertyA->id,
+                'tag' => 'TAG-'.$letter,
+                'name' => 'Row '.$letter,
+                'category_id' => $this->categoryA->id,
+                'department_id' => $this->departmentA->id,
+                'status' => 'in_service',
+                'is_invalid' => false,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+        }
+
+        return $ids;
+    }
+
+    /**
+     * The race this replaces: both endpoints used to resolve a row with
+     * ->orderBy('id')->skip($absoluteIndex)->first(), i.e. by its position on the
+     * rendered page. A delete shifts every later row down one slot, so an edit
+     * still carrying its pre-delete index lands on the row that moved into that
+     * slot. Auto-save fires on a 500ms debounce and never reloads, so the window
+     * is wide and the wrong write is completely silent.
+     *
+     * Verified against the pre-fix controller: deleting A and then editing "index
+     * 1" produced {"TAG-B":"Row B","TAG-C":"Edited B"} — C took B's edit.
+     */
+    public function test_row_operations_target_rows_by_id_after_a_delete_shifts_positions(): void
+    {
+        $this->actingAs($this->userA);
+        $ids = $this->seedThreeStagingRows();
+
+        // The page rendered A, B, C at positions 0, 1, 2. Delete A.
+        $this->postJson(route('assets.import.delete-row'), ['row_id' => $ids['A']])
+            ->assertStatus(200)
+            ->assertJson(['success' => true, 'totalCount' => 2]);
+
+        // Position 1 now resolves to C. Edit B by ID anyway.
+        $this->postJson(route('assets.import.update-row'), [
+            'row_id' => $ids['B'],
+            'field_name' => 'name',
+            'new_value' => 'Edited B',
+        ])->assertStatus(200)->assertJson(['success' => true]);
+
+        $names = \DB::table('temporary_asset_imports')->orderBy('id')->pluck('name', 'tag');
+
+        $this->assertSame('Edited B', $names['TAG-B'], 'The edit must land on the row it named.');
+        $this->assertSame('Row C', $names['TAG-C'], 'C sat at the shifted position and must be untouched.');
+    }
+
+    /**
+     * Looking rows up by ID makes the ID attacker-supplied, so the tenant
+     * predicates carry the whole weight now. Both endpoints must still refuse an
+     * ID belonging to another user/property — and refuse it with the same 422 a
+     * stale ID gets, so the response can't be used to probe for existence.
+     */
+    public function test_row_operations_reject_a_staging_row_id_from_another_property(): void
+    {
+        $foreignId = \DB::table('temporary_asset_imports')->insertGetId([
+            'user_id' => $this->userB->id,
+            'property_id' => $this->propertyB->id,
+            'tag' => 'TAG-FOREIGN',
+            'name' => 'Belongs To Beta',
+            'category_id' => $this->categoryB->id,
+            'department_id' => $this->departmentB->id,
+            'status' => 'in_service',
+            'is_invalid' => false,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $this->actingAs($this->userA);
+        $this->seedThreeStagingRows();
+
+        $this->postJson(route('assets.import.update-row'), [
+            'row_id' => $foreignId,
+            'field_name' => 'name',
+            'new_value' => 'Hijacked',
+        ])->assertStatus(422);
+
+        $this->postJson(route('assets.import.delete-row'), ['row_id' => $foreignId])
+            ->assertStatus(422);
+
+        $foreign = \DB::table('temporary_asset_imports')->find($foreignId);
+        $this->assertNotNull($foreign, 'The other property\'s row must survive.');
+        $this->assertSame('Belongs To Beta', $foreign->name);
+    }
+
+    /**
+     * Everything above depends on the id actually reaching the markup, which no
+     * endpoint test can see. data-row-id is also the handle the planned
+     * multi-select is meant to select rows with, so it is a contract, not an
+     * implementation detail — pin both it and the Alpine scope value.
+     */
+    public function test_review_rows_expose_their_staging_id_to_the_dom_and_alpine_scope(): void
+    {
+        $this->actingAs($this->userA);
+        $ids = $this->seedThreeStagingRows();
+
+        $response = $this->get(route('assets.import-review'));
+        $response->assertStatus(200);
+
+        foreach ($ids as $id) {
+            $response->assertSee('data-row-id="'.$id.'"', false);
+            $response->assertSee('rowId: '.$id.',', false);
+        }
+
+        // The handlers must read the id from that scope, not take a position.
+        $response->assertSee("autoSave('tag', \$event.target.value, \$data)", false);
+        $response->assertSee('requestDeleteRow($data)', false);
+        $response->assertDontSee('absolute_index', false);
     }
 }
 
