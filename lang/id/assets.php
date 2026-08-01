@@ -144,6 +144,18 @@ return [
     'select_sheet_and_header'           => 'Sheet & baris header',
     'header_row_help'                   => 'Baris yang memuat judul kolom Anda. Biarkan Otomatis kecuali kolom yang terdeteksi terlihat keliru.',
     'header_row_invalid'                => 'Baris :row tidak bisa dipakai sebagai header — baris itu kosong atau di luar sheet ini. Deteksi otomatis tetap berlaku.',
+    // Multi-pilih & aksi massal di halaman tinjau
+    'select_all_rows'                   => 'Pilih semua baris di halaman ini',
+    'toggle_row_selection'              => 'Klik untuk memilih baris ini',
+    'rows_selected'                     => ':count dipilih',
+    'clear_selection'                   => 'Bersihkan pilihan',
+    'delete_selected'                   => 'Hapus Terpilih (:count)',
+    'delete_rows_title'                 => 'Hapus Baris',
+    'delete_rows_confirm'               => 'Apakah Anda yakin ingin menghapus :count baris? Tindakan ini tidak dapat dibatalkan.',
+    'bulk_edit_hint'                    => 'Ubah salah satu kolom di bawah untuk menerapkannya ke seluruh :count baris terpilih.',
+    'bulk_update_error'                 => 'Gagal memperbarui baris terpilih: :message',
+    'delete_rows_error'                 => 'Gagal menghapus baris terpilih: :message',
+    'selection_page_scoped'             => 'Pilihan hanya berlaku untuk halaman ini.',
 ];
 
 

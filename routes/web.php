@@ -66,7 +66,8 @@ Route::middleware('auth')->group(function () {
         Route::post('/import/store-batch', 'storeBatch')->name('import-store-batch');
         Route::post('/import-calculate-validation', 'calculateValidation')->name('import-calculate-validation');
         Route::post('/import/update-row', 'updateSingleRow')->name('import.update-row');
-        Route::post('/import/delete-row', 'deleteRow')->name('import.delete-row');
+        Route::post('/import/bulk-update-rows', 'bulkUpdateRows')->name('import.bulk-update-rows');
+        Route::post('/import/delete-rows', 'deleteRows')->name('import.delete-rows');
     });
 
     // Bulk Add Manual (standalone — never touches temporary_asset_imports).

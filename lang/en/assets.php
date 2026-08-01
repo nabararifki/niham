@@ -144,6 +144,18 @@ return [
     'select_sheet_and_header'           => 'Sheet & header row',
     'header_row_help'                   => 'Which row holds your column titles. Leave on Auto unless the detected columns look wrong.',
     'header_row_invalid'                => 'Row :row could not be used as a header — it is empty or outside this sheet. Auto-detection is still in effect.',
+    // Review page multi-select & bulk actions
+    'select_all_rows'                   => 'Select all rows on this page',
+    'toggle_row_selection'              => 'Click to select this row',
+    'rows_selected'                     => ':count selected',
+    'clear_selection'                   => 'Clear selection',
+    'delete_selected'                   => 'Delete Selected (:count)',
+    'delete_rows_title'                 => 'Delete Rows',
+    'delete_rows_confirm'               => 'Are you sure you want to delete :count rows? This action cannot be undone.',
+    'bulk_edit_hint'                    => 'Edit a field below to apply it to all :count selected rows.',
+    'bulk_update_error'                 => 'Failed to update the selected rows: :message',
+    'delete_rows_error'                 => 'Failed to delete the selected rows: :message',
+    'selection_page_scoped'             => 'Selection applies to this page only.',
 ];
 
 

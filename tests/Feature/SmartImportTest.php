@@ -420,7 +420,7 @@ class SmartImportTest extends TestCase
 
         $response->assertStatus(200);
         $response->assertSee('id="delete_row_modal"', false);
-        $response->assertSee('requestDeleteRow', false);
+        $response->assertSee('requestDeleteSelected', false);
         $response->assertSee('confirmDeleteRow', false);
         $response->assertSee('cancelDeleteRow', false);
         $response->assertDontSee('Apakah Anda yakin ingin menghapus baris data ini?');
@@ -837,10 +837,10 @@ class SmartImportTest extends TestCase
         // Assert they both exist in DB
         $this->assertEquals(2, \DB::table('temporary_asset_imports')->where('user_id', $this->userA->id)->count());
 
-        // Call the delete-row endpoint to delete the row tagged TAG-A
+        // Call the delete-rows endpoint to delete the row tagged TAG-A
         $firstRowId = \DB::table('temporary_asset_imports')->where('tag', 'TAG-A')->value('id');
-        $response = $this->postJson(route('assets.import.delete-row'), [
-            'row_id' => $firstRowId,
+        $response = $this->postJson(route('assets.import.delete-rows'), [
+            'row_ids' => [$firstRowId],
         ]);
 
         $response->assertStatus(200);
@@ -1847,7 +1847,7 @@ class SmartImportTest extends TestCase
         $ids = $this->seedThreeStagingRows();
 
         // The page rendered A, B, C at positions 0, 1, 2. Delete A.
-        $this->postJson(route('assets.import.delete-row'), ['row_id' => $ids['A']])
+        $this->postJson(route('assets.import.delete-rows'), ['row_ids' => [$ids['A']]])
             ->assertStatus(200)
             ->assertJson(['success' => true, 'totalCount' => 2]);
 
@@ -1866,9 +1866,13 @@ class SmartImportTest extends TestCase
 
     /**
      * Looking rows up by ID makes the ID attacker-supplied, so the tenant
-     * predicates carry the whole weight now. Both endpoints must still refuse an
-     * ID belonging to another user/property — and refuse it with the same 422 a
-     * stale ID gets, so the response can't be used to probe for existence.
+     * predicates carry the whole weight now.
+     *
+     * The two endpoints refuse differently on purpose. The single-cell path 422s,
+     * indistinguishably from a stale id, so it can't be used to probe existence.
+     * The bulk path drops unowned ids and reports only how many rows it touched —
+     * a mixed list has to keep working, so it can't fail the whole request. Either
+     * way the foreign row must come out untouched, which is what's asserted.
      */
     public function test_row_operations_reject_a_staging_row_id_from_another_property(): void
     {
@@ -1894,8 +1898,9 @@ class SmartImportTest extends TestCase
             'new_value' => 'Hijacked',
         ])->assertStatus(422);
 
-        $this->postJson(route('assets.import.delete-row'), ['row_id' => $foreignId])
-            ->assertStatus(422);
+        $this->postJson(route('assets.import.delete-rows'), ['row_ids' => [$foreignId]])
+            ->assertStatus(200)
+            ->assertJson(['success' => true, 'deletedCount' => 0]);
 
         $foreign = \DB::table('temporary_asset_imports')->find($foreignId);
         $this->assertNotNull($foreign, 'The other property\'s row must survive.');
@@ -1923,8 +1928,360 @@ class SmartImportTest extends TestCase
 
         // The handlers must read the id from that scope, not take a position.
         $response->assertSee("autoSave('tag', \$event.target.value, \$data)", false);
-        $response->assertSee('requestDeleteRow($data)', false);
+        $response->assertSee('toggleRow(rowId)', false);
         $response->assertDontSee('absolute_index', false);
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // 11. MULTI-SELECT: BULK COLUMN EDIT + BULK DELETE
+    // ══════════════════════════════════════════════════════════════
+
+    /**
+     * Seed one staging row for userA, overriding whatever the case needs.
+     */
+    private function seedStagingRow(array $overrides = []): int
+    {
+        return \DB::table('temporary_asset_imports')->insertGetId(array_merge([
+            'user_id' => $this->userA->id,
+            'property_id' => $this->propertyA->id,
+            'tag' => 'BULK-'.\Str::random(4),
+            'name' => 'Bulk Row',
+            'category_id' => $this->categoryA->id,
+            'department_id' => $this->departmentA->id,
+            'status' => 'in_service',
+            'model' => 'original model',
+            'serial_number' => 'SN-ORIGINAL',
+            'remarks' => 'original remarks',
+            'is_invalid' => false,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ], $overrides));
+    }
+
+    /**
+     * The whole point of the bulk endpoint is surgical reach: exactly the named
+     * column, on exactly the selected rows. This snapshots the full rows before
+     * and after and diffs them, so an accidental write to a neighbouring column
+     * (or an unselected row) shows up as a failure rather than passing unnoticed
+     * because nobody thought to assert on that particular field.
+     */
+    public function test_bulk_update_touches_only_the_named_column_on_only_the_selected_rows(): void
+    {
+        $this->actingAs($this->userA);
+
+        $selectedA = $this->seedStagingRow(['tag' => 'SEL-A', 'name' => 'Selected A']);
+        $selectedB = $this->seedStagingRow(['tag' => 'SEL-B', 'name' => 'Selected B']);
+        $untouched = $this->seedStagingRow(['tag' => 'UNSEL', 'name' => 'Not Selected']);
+
+        $before = \DB::table('temporary_asset_imports')->orderBy('id')->get()->keyBy('id');
+
+        $this->postJson(route('assets.import.bulk-update-rows'), [
+            'row_ids' => [$selectedA, $selectedB],
+            'field_name' => 'model',
+            'new_value' => 'UltraSharp U2723QE',
+        ])->assertStatus(200)->assertJson(['success' => true, 'updatedCount' => 2]);
+
+        $after = \DB::table('temporary_asset_imports')->orderBy('id')->get()->keyBy('id');
+
+        foreach ([$selectedA, $selectedB] as $id) {
+            $this->assertSame('UltraSharp U2723QE', $after[$id]->model);
+
+            // Every other column on the edited rows must be byte-identical.
+            foreach ((array) $before[$id] as $column => $value) {
+                if (in_array($column, ['model', 'updated_at'], true)) {
+                    continue;
+                }
+                $this->assertSame($value, $after[$id]->$column, "Column [{$column}] was collateral damage.");
+            }
+        }
+
+        $this->assertEquals((array) $before[$untouched], (array) $after[$untouched],
+            'An unselected row was modified.');
+    }
+
+    /**
+     * A selection can legitimately contain ids the caller does not own only if
+     * someone hand-edits the request — but the legitimate ids in the same list
+     * still have to apply. Failing the whole request would be the easy answer and
+     * the wrong one; dropping the foreign id silently is the contract.
+     */
+    public function test_bulk_update_skips_foreign_ids_while_still_applying_the_owned_ones(): void
+    {
+        $foreignId = \DB::table('temporary_asset_imports')->insertGetId([
+            'user_id' => $this->userB->id,
+            'property_id' => $this->propertyB->id,
+            'tag' => 'TAG-FOREIGN',
+            'name' => 'Belongs To Beta',
+            'category_id' => $this->categoryB->id,
+            'department_id' => $this->departmentB->id,
+            'status' => 'in_service',
+            'model' => 'beta model',
+            'is_invalid' => false,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $this->actingAs($this->userA);
+        $ownedId = $this->seedStagingRow(['tag' => 'OWNED']);
+
+        $this->postJson(route('assets.import.bulk-update-rows'), [
+            'row_ids' => [$ownedId, $foreignId],
+            'field_name' => 'model',
+            'new_value' => 'Applied',
+        ])->assertStatus(200)->assertJson(['success' => true, 'updatedCount' => 1]);
+
+        $this->assertSame('Applied', \DB::table('temporary_asset_imports')->find($ownedId)->model);
+        $this->assertSame('beta model', \DB::table('temporary_asset_imports')->find($foreignId)->model,
+            'The other property\'s row must not be reachable through a bulk list.');
+    }
+
+    /**
+     * The bulk path must not become a shortcut around the FK check the
+     * single-cell path enforces — otherwise selecting rows would be a way to
+     * assign another tenant's category. The rejection also has to land before
+     * any write, so a bad value can't apply to part of the selection.
+     */
+    public function test_bulk_update_enforces_the_same_fk_validation_as_the_single_row_path(): void
+    {
+        $this->actingAs($this->userA);
+        $rowId = $this->seedStagingRow();
+
+        foreach ([['category_id', $this->categoryB->id], ['department_id', $this->departmentB->id]] as [$field, $foreignValue]) {
+            $this->postJson(route('assets.import.bulk-update-rows'), [
+                'row_ids' => [$rowId],
+                'field_name' => $field,
+                'new_value' => (string) $foreignValue,
+            ])->assertStatus(422);
+
+            $this->assertNotEquals(
+                $foreignValue,
+                \DB::table('temporary_asset_imports')->find($rowId)->$field,
+                "A foreign {$field} was written despite the 422."
+            );
+        }
+
+        // The same value from the caller's own property is accepted.
+        $this->postJson(route('assets.import.bulk-update-rows'), [
+            'row_ids' => [$rowId],
+            'field_name' => 'category_id',
+            'new_value' => (string) $this->categoryA->id,
+        ])->assertStatus(200);
+
+        $this->assertEquals($this->categoryA->id, \DB::table('temporary_asset_imports')->find($rowId)->category_id);
+    }
+
+    public function test_bulk_update_rejects_a_field_outside_the_editable_whitelist(): void
+    {
+        $this->actingAs($this->userA);
+        $rowId = $this->seedStagingRow();
+
+        foreach (['user_id', 'property_id', 'is_invalid', 'id'] as $field) {
+            $this->postJson(route('assets.import.bulk-update-rows'), [
+                'row_ids' => [$rowId],
+                'field_name' => $field,
+                'new_value' => '999',
+            ])->assertStatus(422);
+        }
+
+        $row = \DB::table('temporary_asset_imports')->find($rowId);
+        $this->assertEquals($this->userA->id, $row->user_id);
+        $this->assertEquals($this->propertyA->id, $row->property_id);
+    }
+
+    /**
+     * is_invalid is recalculated for the whole selection in one statement, so the
+     * expression has to reproduce updateSingleRow()'s rule exactly — including
+     * the easily-missed part where a row with neither name nor tag counts as a
+     * blank placeholder and stays VALID. Two other places in the controller use a
+     * simpler expression that flags such rows invalid; if the bulk path copied
+     * that one instead, editing fifty rows and editing one would disagree.
+     */
+    public function test_bulk_update_recalculates_invalid_flags_and_global_counters(): void
+    {
+        $this->actingAs($this->userA);
+
+        $valid = $this->seedStagingRow(['tag' => 'V-1', 'name' => 'Has Everything']);
+        $noName = $this->seedStagingRow(['tag' => 'V-2', 'name' => '', 'is_invalid' => true]);
+        $blank = $this->seedStagingRow(['tag' => '', 'name' => '', 'is_invalid' => true]);
+
+        // Clearing the category invalidates any row that still has a name.
+        $response = $this->postJson(route('assets.import.bulk-update-rows'), [
+            'row_ids' => [$valid, $noName, $blank],
+            'field_name' => 'category_id',
+            'new_value' => '',
+        ]);
+
+        $response->assertStatus(200)->assertJson(['success' => true, 'updatedCount' => 3]);
+
+        $rows = \DB::table('temporary_asset_imports')->orderBy('id')->get()->keyBy('id');
+
+        $this->assertTrue((bool) $rows[$valid]->is_invalid, 'A named row with no category is invalid.');
+        $this->assertTrue((bool) $rows[$noName]->is_invalid, 'A tagged row with no name is invalid.');
+        $this->assertFalse((bool) $rows[$blank]->is_invalid, 'A wholly blank row is a placeholder, not an error.');
+
+        // The global counters follow the pre-existing definition, which is NOT a
+        // sum of the is_invalid flags: validCount requires a non-empty name, and
+        // invalidCount is whatever's left over. So the blank row reads as valid
+        // per-row yet still counts against invalidCount. Asserting the real
+        // numbers rather than the intuitive ones keeps this test honest about
+        // what the endpoint actually reports.
+        $response->assertJson(['totalCount' => 3, 'validCount' => 0, 'invalidCount' => 3]);
+        $this->assertSame([1], $response->json('invalidPages'));
+
+        // And the per-row flags handed back for repainting must match too.
+        $this->assertTrue($response->json('rowFlags.'.$valid));
+        $this->assertFalse($response->json('rowFlags.'.$blank));
+    }
+
+    public function test_bulk_delete_removes_exactly_the_selected_rows(): void
+    {
+        $this->actingAs($this->userA);
+
+        $doomedA = $this->seedStagingRow(['tag' => 'DEL-A']);
+        $doomedB = $this->seedStagingRow(['tag' => 'DEL-B']);
+        $keep = $this->seedStagingRow(['tag' => 'KEEP']);
+
+        $this->postJson(route('assets.import.delete-rows'), [
+            'row_ids' => [$doomedA, $doomedB],
+        ])->assertStatus(200)->assertJson([
+            'success' => true,
+            'deletedCount' => 2,
+            'totalCount' => 1,
+        ]);
+
+        $remaining = \DB::table('temporary_asset_imports')->pluck('tag')->all();
+        $this->assertSame(['KEEP'], $remaining);
+        $this->assertNotNull(\DB::table('temporary_asset_imports')->find($keep));
+    }
+
+    public function test_bulk_delete_leaves_another_propertys_rows_alone(): void
+    {
+        $foreignId = \DB::table('temporary_asset_imports')->insertGetId([
+            'user_id' => $this->userB->id,
+            'property_id' => $this->propertyB->id,
+            'tag' => 'TAG-FOREIGN',
+            'name' => 'Belongs To Beta',
+            'category_id' => $this->categoryB->id,
+            'department_id' => $this->departmentB->id,
+            'status' => 'in_service',
+            'is_invalid' => false,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $this->actingAs($this->userA);
+        $ownedId = $this->seedStagingRow(['tag' => 'OWNED']);
+
+        $this->postJson(route('assets.import.delete-rows'), [
+            'row_ids' => [$ownedId, $foreignId],
+        ])->assertStatus(200)->assertJson(['deletedCount' => 1]);
+
+        $this->assertNull(\DB::table('temporary_asset_imports')->find($ownedId));
+        $this->assertNotNull(\DB::table('temporary_asset_imports')->find($foreignId));
+    }
+
+    /**
+     * The Action column is gone, so selection is now the only route to delete.
+     * The bulk header widgets must also be the same element type the column uses
+     * per row — a text box where a category dropdown belongs would let the user
+     * type a name that can never resolve to a category id.
+     */
+    public function test_review_page_renders_multi_select_controls_instead_of_an_action_column(): void
+    {
+        $this->actingAs($this->userA);
+        $ids = $this->seedThreeStagingRows();
+
+        $response = $this->get(route('assets.import-review'));
+        $response->assertStatus(200);
+
+        // Selection plumbing.
+        $response->assertSee('x-ref="selectAll"', false);
+        $response->assertSee('indeterminate = someSelected && !allSelected', false);
+        $response->assertSee('@click="toggleRow(rowId)"', false);
+        $response->assertSee('@contextmenu="openRowMenu($event, rowId)"', false);
+        $response->assertSee('pageRowIds', false);
+
+        foreach ($ids as $id) {
+            $response->assertSee('data-row-id="'.$id.'"', false);
+        }
+
+        // Bulk widgets, with the FK columns wired to real option lists.
+        $response->assertSee("bulkUpdate('category_id', \$event.target.value)", false);
+        $response->assertSee("bulkUpdate('status', \$event.target.value)", false);
+        $response->assertSee("bulkUpdate('purchase_date', \$event.target.value)", false);
+        $response->assertSee(route('assets.import.bulk-update-rows', [], false), false);
+
+        // The Action column and its per-row delete button are gone.
+        $response->assertDontSee('>'.__('assets.action').'</th>', false);
+        $response->assertDontSee('requestDeleteRow($data)', false);
+
+        // Header and body must still agree on the column count. Counting the
+        // rendered cells catches a dropped <th>/<td> pair, which eyeballing the
+        // Blade does not.
+        $html = $response->getContent();
+        preg_match('/<thead.*?<\/thead>/s', $html, $thead);
+        preg_match('/<tr data-row-id.*?<\/tr>/s', $html, $firstRow);
+
+        // [\s>] so the opening <thead> tag isn't counted as a cell.
+        $this->assertSame(11, preg_match_all('/<th[\s>]/', $thead[0] ?? ''), 'Expected 11 header cells.');
+        $this->assertSame(11, preg_match_all('/<td[\s>]/', $firstRow[0] ?? ''), 'Body row must match the header.');
+    }
+
+    /**
+     * A selected row swaps its number for a ticked box and takes a background of
+     * its own. The background is asserted as an exclusive branch rather than two
+     * stacked class lists on purpose: "selected" and "invalid" both set a
+     * background, and if both classes were emitted at once the winner would be
+     * decided by Tailwind's output order rather than by anything in this file.
+     */
+    public function test_selected_rows_swap_the_number_for_a_tick_and_change_colour(): void
+    {
+        $this->actingAs($this->userA);
+        $this->seedThreeStagingRows();
+
+        $html = $this->get(route('assets.import-review'))->assertStatus(200)->getContent();
+
+        preg_match('/<tr data-row-id.*?<\/td>/s', $html, $m);
+        $rowMarkup = $m[0] ?? '';
+
+        // Number and tick are mutually exclusive within the one cell.
+        $this->assertStringContainsString('x-show="!isSelected(rowId)"', $rowMarkup);
+        $this->assertStringContainsString('x-show="isSelected(rowId)"', $rowMarkup);
+        $this->assertStringContainsString('x-cloak', $rowMarkup,
+            'The tick must be cloaked or it flashes on every row before Alpine boots.');
+
+        // Exactly one background class per state — no stacking.
+        $this->assertStringContainsString('bg-accent/10 dark:bg-accent/20', $rowMarkup,
+            'Selected valid rows need their own background, not just a ring.');
+        $this->assertStringContainsString('bg-red-100 dark:bg-red-900/50', $rowMarkup,
+            'A selected invalid row must stay visibly invalid.');
+        // Scoped to the <tr> tag alone — the number <td> has its own, unrelated
+        // isSelected() binding for the text colour.
+        preg_match('/<tr data-row-id.*?>/s', $html, $trTag);
+        $this->assertSame(1, substr_count($trTag[0] ?? '', ':class='),
+            'Row background must come from a single exclusive branch, not stacked class lists.');
+    }
+
+    public function test_multi_select_copy_follows_the_active_locale(): void
+    {
+        $this->actingAs($this->userA);
+        $this->seedThreeStagingRows();
+
+        foreach (['en', 'id'] as $locale) {
+            app()->setLocale($locale);
+            $response = $this->get(route('assets.import-review'));
+            $response->assertStatus(200);
+            $response->assertSee(__('assets.clear_selection'), false);
+            $response->assertSee(__('assets.select_all_rows'), false);
+        }
+
+        // Guard against both assertions above trivially matching the same string.
+        foreach (['clear_selection', 'select_all_rows', 'delete_rows_title', 'rows_selected'] as $key) {
+            app()->setLocale('en');
+            $en = __('assets.'.$key);
+            app()->setLocale('id');
+            $this->assertNotEquals($en, __('assets.'.$key), "Key [{$key}] is not actually translated.");
+        }
     }
 }
 

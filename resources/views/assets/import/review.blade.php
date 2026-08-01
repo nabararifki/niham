@@ -26,9 +26,18 @@
         }
     </style>
 
+    @php
+        // Ids of the rows on THIS page. Selection is deliberately page-scoped —
+        // review paginates server-side at 50/page, and letting a selection span
+        // pages the user can't see is worse than making them re-select.
+        $pageRowIds = collect($paginatedData->items())->pluck('id')->map(fn ($id) => (int) $id)->values();
+    @endphp
+
     {{-- @js, not @json: these happen to be integers today, but @json emits literal
          double quotes for any string value, which would terminate this attribute. --}}
-    <div class="py-8" x-data="importReview({ validCount: @js($validCount), invalidCount: @js($invalidCount), invalidPages: @js($invalidPages), total: @js($total) })">
+    <div class="py-8"
+         @keydown.escape.window="onEscape()"
+         x-data="importReview({ validCount: @js($validCount), invalidCount: @js($invalidCount), invalidPages: @js($invalidPages), total: @js($total), pageRowIds: @js($pageRowIds) })">
         <div class="max-w-7xl mx-auto sm:px-6 lg:px-8 space-y-6">
 
             {{-- ─── Progress Stepper (Top) ─────────────────────────────────────── --}}
@@ -97,23 +106,163 @@
                             </div>
                         @endif
 
+                        {{-- ─── Selection Toolbar ──────────────────────────────────────
+                             The touch-accessible path to bulk delete. The context menu is a
+                             shortcut for mouse users, never the only way to get here. --}}
+                        <div x-show="selectionCount > 0" x-cloak
+                             class="mb-4 flex flex-wrap items-center justify-between gap-3 px-4 py-3 rounded-xl bg-accent/10 border border-accent/20">
+                            <div class="flex items-center gap-2 text-sm font-semibold text-accent">
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                                <span x-text="selectedText"></span>
+                                <span class="font-normal text-xs text-gray-500 dark:text-gray-400 hidden sm:inline">
+                                    · {{ __('assets.selection_page_scoped') }}
+                                </span>
+                            </div>
+                            <div class="flex items-center gap-2">
+                                <span class="text-xs text-gray-500 dark:text-gray-400 hidden md:inline" x-text="bulkHintText"></span>
+                                <button type="button" @click="clearSelection()"
+                                        class="btn btn-xs btn-ghost border border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg">
+                                    {{ __('assets.clear_selection') }}
+                                </button>
+                                <button type="button" @click="requestDeleteSelected()"
+                                        class="btn btn-xs btn-error border-transparent text-white hover:opacity-90 rounded-lg">
+                                    <svg class="w-3.5 h-3.5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+                                    <span x-text="deleteSelectedText"></span>
+                                </button>
+                            </div>
+                        </div>
+
                         {{-- ─── Data Table ─────────────────────────────────────────── --}}
                         <div class="overflow-x-auto w-full rounded-xl border border-gray-200/50 dark:border-gray-700/50">
                             <table class="min-w-full divide-y divide-gray-200/50 dark:divide-gray-700/50 text-sm">
+                                {{-- ─────────────────────────────────────────────────────────────
+                                     While rows are selected each header shrinks its label and
+                                     reveals a bulk-edit widget of the SAME type the column uses
+                                     in a normal row — a select for category/department/status, a
+                                     date picker for purchase_date, and so on. A generic text box
+                                     everywhere would let someone type a category name that can
+                                     never match a category id.
+
+                                     They commit on @change (blur/Enter, or immediately on pick for
+                                     a select) rather than on debounced input: one deliberate edit
+                                     is one request, instead of every typing pause rewriting a
+                                     column across the whole selection.
+                                ──────────────────────────────────────────────────────────────── --}}
                                 <thead class="bg-gray-50/80 dark:bg-gray-900/80">
                                     <tr>
-                                        <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 dark:text-gray-300 uppercase tracking-wider w-8">#</th>
-                                        <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 dark:text-gray-300 uppercase tracking-wider">{{ __('assets.tag') }} *</th>
-                                        <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 dark:text-gray-300 uppercase tracking-wider">{{ __('assets.name') }} *</th>
-                                        <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 dark:text-gray-300 uppercase tracking-wider">{{ __('assets.category') }} *</th>
-                                        <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 dark:text-gray-300 uppercase tracking-wider">{{ __('assets.department') }} *</th>
-                                        <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 dark:text-gray-300 uppercase tracking-wider">{{ __('assets.status') }}</th>
-                                        <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 dark:text-gray-300 uppercase tracking-wider">{{ __('assets.model_brand') }}</th>
-                                        <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 dark:text-gray-300 uppercase tracking-wider">{{ __('assets.serial_number') }}</th>
-                                        <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 dark:text-gray-300 uppercase tracking-wider">{{ __('assets.purchase_date') }}</th>
-                                        <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 dark:text-gray-300 uppercase tracking-wider">{{ __('assets.purchase_cost') }}</th>
-                                        <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 dark:text-gray-300 uppercase tracking-wider">{{ __('assets.remarks') }}</th>
-                                        <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 dark:text-gray-300 uppercase tracking-wider">{{ __('assets.action') }}</th>
+                                        <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 dark:text-gray-300 uppercase tracking-wider w-8 align-top">
+                                            {{-- indeterminate is a DOM property, not an attribute, so it
+                                                 can't be set with a plain :binding — x-effect re-applies
+                                                 it whenever the selection changes. --}}
+                                            <input type="checkbox"
+                                                   x-ref="selectAll"
+                                                   :checked="allSelected"
+                                                   x-effect="$refs.selectAll.indeterminate = someSelected && !allSelected"
+                                                   @change="toggleAll()"
+                                                   aria-label="{{ __('assets.select_all_rows') }}"
+                                                   title="{{ __('assets.select_all_rows') }}"
+                                                   class="rounded border-gray-300 dark:border-gray-600 text-accent focus:ring-accent cursor-pointer">
+                                        </th>
+
+                                        @php
+                                            $thClass   = 'px-3 py-3 text-left text-xs font-semibold text-gray-500 dark:text-gray-300 uppercase tracking-wider align-top';
+                                            $bulkInput = 'mt-1.5 block border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:ring-accent focus:border-accent text-xs normal-case font-normal dark:bg-gray-900/50 dark:text-white';
+                                        @endphp
+
+                                        <th class="{{ $thClass }}">
+                                            <div :class="selectionCount > 0 ? 'text-[10px] leading-tight' : ''">{{ __('assets.tag') }} *</div>
+                                            <template x-if="selectionCount > 0">
+                                                <input type="text" @change="bulkUpdate('tag', $event.target.value)"
+                                                       class="{{ $bulkInput }} w-32" />
+                                            </template>
+                                        </th>
+
+                                        <th class="{{ $thClass }}">
+                                            <div :class="selectionCount > 0 ? 'text-[10px] leading-tight' : ''">{{ __('assets.name') }} *</div>
+                                            <template x-if="selectionCount > 0">
+                                                <input type="text" @change="bulkUpdate('name', $event.target.value)"
+                                                       class="{{ $bulkInput }} w-40" />
+                                            </template>
+                                        </th>
+
+                                        <th class="{{ $thClass }}">
+                                            <div :class="selectionCount > 0 ? 'text-[10px] leading-tight' : ''">{{ __('assets.category') }} *</div>
+                                            <template x-if="selectionCount > 0">
+                                                <select @change="bulkUpdate('category_id', $event.target.value)"
+                                                        class="{{ $bulkInput }} w-36">
+                                                    <option value="">{{ __('assets.select_placeholder') }}</option>
+                                                    @foreach($categories as $cat)
+                                                        <option value="{{ $cat->id }}">{{ $cat->name }}</option>
+                                                    @endforeach
+                                                </select>
+                                            </template>
+                                        </th>
+
+                                        <th class="{{ $thClass }}">
+                                            <div :class="selectionCount > 0 ? 'text-[10px] leading-tight' : ''">{{ __('assets.department') }} *</div>
+                                            <template x-if="selectionCount > 0">
+                                                <select @change="bulkUpdate('department_id', $event.target.value)"
+                                                        class="{{ $bulkInput }} w-36">
+                                                    <option value="">{{ __('assets.select_placeholder') }}</option>
+                                                    @foreach($departments as $dept)
+                                                        <option value="{{ $dept->id }}">{{ $dept->name }}</option>
+                                                    @endforeach
+                                                </select>
+                                            </template>
+                                        </th>
+
+                                        <th class="{{ $thClass }}">
+                                            <div :class="selectionCount > 0 ? 'text-[10px] leading-tight' : ''">{{ __('assets.status') }}</div>
+                                            <template x-if="selectionCount > 0">
+                                                <select @change="bulkUpdate('status', $event.target.value)"
+                                                        class="{{ $bulkInput }} w-32">
+                                                    <option value="">{{ __('assets.select_placeholder') }}</option>
+                                                    <option value="in_service">{{ __('assets.in_service') }}</option>
+                                                    <option value="out_of_service">{{ __('assets.out_of_service') }}</option>
+                                                    <option value="disposed">{{ __('assets.disposed') }}</option>
+                                                </select>
+                                            </template>
+                                        </th>
+
+                                        <th class="{{ $thClass }}">
+                                            <div :class="selectionCount > 0 ? 'text-[10px] leading-tight' : ''">{{ __('assets.model_brand') }}</div>
+                                            <template x-if="selectionCount > 0">
+                                                <input type="text" @change="bulkUpdate('model', $event.target.value)"
+                                                       class="{{ $bulkInput }} w-32" />
+                                            </template>
+                                        </th>
+
+                                        <th class="{{ $thClass }}">
+                                            <div :class="selectionCount > 0 ? 'text-[10px] leading-tight' : ''">{{ __('assets.serial_number') }}</div>
+                                            <template x-if="selectionCount > 0">
+                                                <input type="text" @change="bulkUpdate('serial_number', $event.target.value)"
+                                                       class="{{ $bulkInput }} w-32" />
+                                            </template>
+                                        </th>
+
+                                        <th class="{{ $thClass }}">
+                                            <div :class="selectionCount > 0 ? 'text-[10px] leading-tight' : ''">{{ __('assets.purchase_date') }}</div>
+                                            <template x-if="selectionCount > 0">
+                                                <input type="date" @change="bulkUpdate('purchase_date', $event.target.value)"
+                                                       class="{{ $bulkInput }} w-36" />
+                                            </template>
+                                        </th>
+
+                                        <th class="{{ $thClass }}">
+                                            <div :class="selectionCount > 0 ? 'text-[10px] leading-tight' : ''">{{ __('assets.purchase_cost') }}</div>
+                                            <template x-if="selectionCount > 0">
+                                                <input type="number" step="any" @change="bulkUpdate('purchase_cost', $event.target.value)"
+                                                       class="{{ $bulkInput }} w-28" />
+                                            </template>
+                                        </th>
+
+                                        <th class="{{ $thClass }}">
+                                            <div :class="selectionCount > 0 ? 'text-[10px] leading-tight' : ''">{{ __('assets.remarks') }}</div>
+                                            <template x-if="selectionCount > 0">
+                                                <input type="text" @change="bulkUpdate('remarks', $event.target.value)"
+                                                       class="{{ $bulkInput }} w-40" />
+                                            </template>
+                                        </th>
                                     </tr>
                                 </thead>
                                 <tbody id="review-tbody" class="divide-y divide-gray-200/50 dark:divide-gray-700/50 bg-white dark:bg-gray-800">
@@ -135,13 +284,38 @@
                                              query [data-row-id]); rowId in the scope is what the
                                              edit/delete handlers read. Declared once per row so the
                                              two can never disagree. --}}
+                                        {{-- The four states are spelled out rather than composed from two
+                                             independent class lists, because "selected" and "invalid" both
+                                             set a background: with two lists the winner would be decided by
+                                             Tailwind's output order, not by anything written here. Branching
+                                             guarantees exactly one background class is ever emitted, and
+                                             keeps a selected invalid row visibly still invalid. --}}
                                         <tr data-row-id="{{ $item['id'] }}"
                                             x-data="{ rowId: {{ (int) $item['id'] }}, isInvalid: {{ ($item['is_invalid'] ?? false) ? 'true' : 'false' }} }"
-                                            :class="isInvalid ? 'bg-red-50 dark:bg-red-900/20 border-l-4 border-error' : 'hover:bg-gray-50/50 dark:hover:bg-gray-700/30'"
+                                            @contextmenu="openRowMenu($event, rowId)"
+                                            :class="isSelected(rowId)
+                                                ? (isInvalid
+                                                    ? 'bg-red-100 dark:bg-red-900/50 border-l-4 border-error ring-2 ring-inset ring-accent/70'
+                                                    : 'bg-accent/10 dark:bg-accent/20 ring-2 ring-inset ring-accent/70')
+                                                : (isInvalid
+                                                    ? 'bg-red-50 dark:bg-red-900/20 border-l-4 border-error'
+                                                    : 'hover:bg-gray-50/50 dark:hover:bg-gray-700/30')"
                                             class="transition-colors">
-                                            {{-- Row number --}}
-                                            <td class="px-3 py-2.5 text-xs text-gray-400 dark:text-gray-500 font-mono">
-                                                {{ number_format($globalIndex + 1) }}
+                                            {{-- Row number, which becomes a ticked box while the row is
+                                                 selected. Both states live in this one cell, which is also
+                                                 the click target for toggling the row. --}}
+                                            <td class="px-3 py-2.5 text-xs font-mono cursor-pointer select-none"
+                                                @click="toggleRow(rowId)"
+                                                :class="isSelected(rowId) ? 'text-accent' : 'text-gray-400 dark:text-gray-500'"
+                                                title="{{ __('assets.toggle_row_selection') }}">
+                                                <span x-show="!isSelected(rowId)">{{ number_format($globalIndex + 1) }}</span>
+                                                {{-- x-cloak: selectedIds starts empty, so without it this
+                                                     tick would flash on every row before Alpine boots. --}}
+                                                <span x-show="isSelected(rowId)" x-cloak
+                                                      class="inline-flex items-center justify-center w-4 h-4 rounded bg-accent text-white align-middle"
+                                                      aria-hidden="true">
+                                                    <svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="3" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                                                </span>
                                             </td>
 
                                             {{-- Tag --}}
@@ -252,19 +426,10 @@
                                                        class="block w-40 border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:ring-accent focus:border-accent text-xs dark:bg-gray-900/50 dark:text-white" />
                                             </td>
 
-                                            {{-- Action (Delete row via AJAX, confirmed through delete_row_modal) --}}
-                                            <td class="px-2 py-2.5 whitespace-nowrap text-center">
-                                                <button type="button"
-                                                        @click="requestDeleteRow($data)"
-                                                        class="text-red-500 hover:text-red-700 dark:hover:text-red-400 transition-colors p-1.5 bg-red-50 dark:bg-red-900/20 rounded-lg"
-                                                        title="{{ __('assets.action') }}">
-                                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
-                                                </button>
-                                            </td>
                                         </tr>
                                     @empty
                                         <tr>
-                                            <td colspan="12" class="px-3 py-12 text-center text-sm text-gray-500 dark:text-gray-400">
+                                            <td colspan="11" class="px-3 py-12 text-center text-sm text-gray-500 dark:text-gray-400">
                                                 {{ __('assets.no_data_extracted') }}
                                             </td>
                                         </tr>
@@ -392,12 +557,14 @@
                 </div>
             </dialog>
 
-            {{-- Delete Row Confirmation Modal --}}
+            {{-- Delete Confirmation Modal — copy switches between the singular and
+                 count-aware wording depending on how many rows are selected.
+                 A native confirm() can't be styled or localized, which is why this
+                 modal exists in the first place. --}}
             <dialog id="delete_row_modal" class="modal modal-bottom sm:modal-middle backdrop-blur-sm">
                 <div class="modal-box bg-white/95 dark:bg-gray-800/95 backdrop-blur-md border border-gray-200/50 dark:border-gray-700/50 shadow-2xl rounded-2xl p-6 text-gray-900 dark:text-gray-100">
                     <div class="flex justify-between items-center pb-4 border-b border-gray-200/50 dark:border-gray-700/50 mb-4">
-                        <h3 class="font-bold text-lg text-gray-900 dark:text-white">
-                            {{ __('assets.delete_row_title') }}
+                        <h3 class="font-bold text-lg text-gray-900 dark:text-white" x-text="deleteTitleText">
                         </h3>
                         <form method="dialog">
                             <button @click="cancelDeleteRow()" class="text-gray-500 hover:text-gray-700 dark:hover:text-gray-300">
@@ -406,8 +573,7 @@
                         </form>
                     </div>
 
-                    <p class="text-sm text-gray-700 dark:text-gray-300 leading-relaxed my-4">
-                        {{ __('assets.delete_row_confirm') }}
+                    <p class="text-sm text-gray-700 dark:text-gray-300 leading-relaxed my-4" x-text="deleteConfirmText">
                     </p>
 
                     <div class="modal-action border-t border-gray-200/50 dark:border-gray-700/50 pt-4 flex justify-end gap-3">
@@ -424,6 +590,29 @@
                 </div>
             </dialog>
 
+            {{-- Row Context Menu — Blade-rendered and localized, not the native menu.
+                 Positioned at the cursor; openRowMenu() decides whether we're even
+                 allowed to take over the right-click. --}}
+            <div x-show="menuOpen" x-cloak
+                 @click.outside="closeRowMenu()"
+                 @scroll.window="closeRowMenu()"
+                 @resize.window="closeRowMenu()"
+                 :style="`top: ${menuY}px; left: ${menuX}px`"
+                 class="fixed z-50 min-w-[13rem] py-1.5 rounded-xl bg-white/95 dark:bg-gray-800/95 backdrop-blur-md border border-gray-200/50 dark:border-gray-700/50 shadow-2xl text-sm">
+                <div class="px-3 py-1.5 text-xs font-semibold text-gray-400 dark:text-gray-500 border-b border-gray-200/50 dark:border-gray-700/50 mb-1"
+                     x-text="selectedText"></div>
+                <button type="button" @click="requestDeleteSelected()"
+                        class="w-full flex items-center gap-2.5 px-3 py-2 text-left text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors">
+                    <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+                    <span x-text="deleteSelectedText"></span>
+                </button>
+                <button type="button" @click="clearSelection(); closeRowMenu()"
+                        class="w-full flex items-center gap-2.5 px-3 py-2 text-left text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700/50 transition-colors">
+                    <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                    {{ __('assets.clear_selection') }}
+                </button>
+            </div>
+
         </div>{{-- /max-w --}}
     </div>
 
@@ -437,8 +626,11 @@
                 invalidCount: config.invalidCount || 0,
                 invalidPages: config.invalidPages || [],
                 totalRows: config.total || 0,
-                pendingDeleteRowId: null,
-                pendingDeleteScope: null,
+                pageRowIds: config.pageRowIds || [],
+                selectedIds: [],
+                menuOpen: false,
+                menuX: 0,
+                menuY: 0,
 
                 get validText() {
                     return @json(__('assets.preflight_valid_rows', ['count' => '__COUNT__'])).replace('__COUNT__', Number(this.validCount).toLocaleString());
@@ -448,30 +640,88 @@
                     return @json(__('assets.preflight_invalid_warning', ['count' => '__COUNT__'])).replace('__COUNT__', Number(this.invalidCount).toLocaleString());
                 },
 
-                // Opens delete_row_modal instead of the browser's native confirm() —
-                // confirm() can't be styled or localized through Blade at all, which is
-                // why it was stuck showing hardcoded Indonesian regardless of locale.
-                requestDeleteRow(trScope) {
-                    this.pendingDeleteRowId = trScope.rowId;
-                    this.pendingDeleteScope = trScope;
-                    document.getElementById('delete_row_modal').showModal();
+                // ── Selection ────────────────────────────────────────────────
+                get selectionCount() { return this.selectedIds.length; },
+                get allSelected() {
+                    return this.pageRowIds.length > 0 && this.selectedIds.length === this.pageRowIds.length;
+                },
+                get someSelected() {
+                    return this.selectedIds.length > 0 && !this.allSelected;
                 },
 
-                cancelDeleteRow() {
-                    document.getElementById('delete_row_modal').close();
-                    this.pendingDeleteRowId = null;
-                    this.pendingDeleteScope = null;
+                get selectedText() {
+                    return @json(__('assets.rows_selected', ['count' => '__COUNT__'])).replace('__COUNT__', Number(this.selectionCount).toLocaleString());
+                },
+                get deleteSelectedText() {
+                    return @json(__('assets.delete_selected', ['count' => '__COUNT__'])).replace('__COUNT__', Number(this.selectionCount).toLocaleString());
+                },
+                get bulkHintText() {
+                    return @json(__('assets.bulk_edit_hint', ['count' => '__COUNT__'])).replace('__COUNT__', Number(this.selectionCount).toLocaleString());
+                },
+                get deleteTitleText() {
+                    return this.selectionCount > 1
+                        ? @js(__('assets.delete_rows_title'))
+                        : @js(__('assets.delete_row_title'));
+                },
+                get deleteConfirmText() {
+                    if (this.selectionCount <= 1) return @js(__('assets.delete_row_confirm'));
+                    return @json(__('assets.delete_rows_confirm', ['count' => '__COUNT__'])).replace('__COUNT__', Number(this.selectionCount).toLocaleString());
                 },
 
-                async confirmDeleteRow() {
-                    document.getElementById('delete_row_modal').close();
-                    const rowId = this.pendingDeleteRowId;
-                    this.pendingDeleteRowId = null;
-                    this.pendingDeleteScope = null;
-                    if (!rowId) return;
+                isSelected(rowId) { return this.selectedIds.includes(rowId); },
+
+                toggleRow(rowId) {
+                    const i = this.selectedIds.indexOf(rowId);
+                    if (i === -1) this.selectedIds.push(rowId);
+                    else this.selectedIds.splice(i, 1);
+                },
+
+                toggleAll() {
+                    this.selectedIds = this.allSelected ? [] : [...this.pageRowIds];
+                },
+
+                clearSelection() { this.selectedIds = []; },
+
+                // Escape unwinds one layer at a time: close the menu first, and
+                // only drop the selection once there's no menu left to dismiss.
+                onEscape() {
+                    if (this.menuOpen) { this.closeRowMenu(); return; }
+                    this.clearSelection();
+                },
+
+                // ── Context menu ─────────────────────────────────────────────
+                openRowMenu(e, rowId) {
+                    // Don't steal the browser's own menu from someone working inside a
+                    // field — they're far more likely to want copy/paste than our menu.
+                    // An input that isn't focused is fair game.
+                    const t = e.target;
+                    if (t.matches && t.matches('input, select, textarea') && document.activeElement === t) {
+                        return;
+                    }
+
+                    e.preventDefault();
+
+                    // Right-clicking outside the selection acts on that row alone,
+                    // matching how file managers behave.
+                    if (!this.isSelected(rowId)) this.selectedIds = [rowId];
+
+                    // Keep the menu inside the viewport near the right/bottom edges.
+                    this.menuX = Math.min(e.clientX, window.innerWidth - 230);
+                    this.menuY = Math.min(e.clientY, window.innerHeight - 140);
+                    this.menuOpen = true;
+                },
+
+                closeRowMenu() { this.menuOpen = false; },
+
+                // ── Bulk column edit ─────────────────────────────────────────
+                // One request for the whole selection. Fanning this out into a
+                // per-row auto-save would rebuild the request-per-cell cost this
+                // page was already refactored away from.
+                async bulkUpdate(fieldName, newValue) {
+                    if (this.selectionCount === 0) return;
 
                     try {
-                        const response = await fetch('{{ route("assets.import.delete-row") }}', {
+                        const response = await fetch('{{ route("assets.import.bulk-update-rows") }}', {
                             method: 'POST',
                             headers: {
                                 'Content-Type': 'application/json',
@@ -480,7 +730,95 @@
                                 'Accept': 'application/json'
                             },
                             body: JSON.stringify({
-                                row_id: rowId
+                                row_ids: this.selectedIds,
+                                field_name: fieldName,
+                                new_value: newValue
+                            })
+                        });
+
+                        if (!response.ok) {
+                            throw new Error('Bulk update request failed');
+                        }
+
+                        const data = await response.json();
+                        if (!data.success) {
+                            throw new Error(data.message || 'Bulk update failed');
+                        }
+
+                        this.validCount = data.validCount;
+                        this.invalidCount = data.invalidCount;
+                        this.totalRows = data.totalCount;
+                        this.invalidPages = data.invalidPages;
+
+                        // Repaint each affected row's invalid highlighting in place. A
+                        // reload would be simpler but would throw away the selection
+                        // the user is still working with.
+                        this.applyRowFlags(data.rowFlags || {});
+                        this.syncVisibleCells(fieldName, newValue);
+                    } catch (err) {
+                        console.error('Bulk update failed:', err);
+                        {{-- @js, not @json: @json splits on commas and would swallow
+                             the ['message' => ...] argument. Same reasoning as below. --}}
+                        const message = @js(__('assets.bulk_update_error', ['message' => '__MSG__']))
+                            .replace('__MSG__', err.message);
+                        alert(message);
+                    }
+                },
+
+                // The server is the source of truth for is_invalid; push its answer
+                // into each row's own Alpine scope via the DOM node we already tag
+                // with data-row-id. Alpine.$data() is the supported way in — the
+                // _x_dataStack property it wraps is internal and has moved before.
+                applyRowFlags(rowFlags) {
+                    Object.entries(rowFlags).forEach(([id, isInvalid]) => {
+                        const tr = document.querySelector(`tr[data-row-id="${id}"]`);
+                        if (!tr) return;
+                        const scope = Alpine.$data(tr);
+                        if (scope) scope.isInvalid = isInvalid;
+                    });
+                },
+
+                // Mirror the committed value into the per-row inputs so the table
+                // shows what was actually saved without a round trip.
+                syncVisibleCells(fieldName, newValue) {
+                    this.selectedIds.forEach((id) => {
+                        const tr = document.querySelector(`tr[data-row-id="${id}"]`);
+                        if (!tr) return;
+                        const field = tr.querySelector(`[name$="[${fieldName}]"]`);
+                        if (field) field.value = newValue;
+                    });
+                },
+
+                // ── Delete ───────────────────────────────────────────────────
+                // Opens delete_row_modal instead of the browser's native confirm() —
+                // confirm() can't be styled or localized through Blade at all, which is
+                // why it was stuck showing hardcoded Indonesian regardless of locale.
+                requestDeleteSelected() {
+                    if (this.selectionCount === 0) return;
+                    this.closeRowMenu();
+                    document.getElementById('delete_row_modal').showModal();
+                },
+
+                cancelDeleteRow() {
+                    document.getElementById('delete_row_modal').close();
+                },
+
+                async confirmDeleteRow() {
+                    document.getElementById('delete_row_modal').close();
+                    const rowIds = [...this.selectedIds];
+                    if (rowIds.length === 0) return;
+
+                    try {
+                        const response = await fetch('{{ route("assets.import.delete-rows") }}', {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'X-CSRF-TOKEN': '{{ csrf_token() }}',
+                                'X-Requested-With': 'XMLHttpRequest',
+                                'Accept': 'application/json'
+                            },
+                            body: JSON.stringify({
+                                row_ids: rowIds
                             })
                         });
 
@@ -494,6 +832,7 @@
                             this.invalidCount = data.invalidCount;
                             this.totalRows = data.totalCount;
                             this.invalidPages = data.invalidPages;
+                            this.clearSelection();
 
                             // Reload so the # column and pagination re-settle. Row identity
                             // no longer depends on this — every row carries its own id —
@@ -507,9 +846,10 @@
                              aren't exempt from directive scanning. @js is used because @json
                              splits its expression on commas, which would swallow the
                              ['message' => ...] argument as the encoding-flags parameter. --}}
-                        const message = @js(__('assets.delete_row_error', ['message' => '__MSG__']))
-                            .replace('__MSG__', err.message);
-                        alert(message);
+                        const template = rowIds.length > 1
+                            ? @js(__('assets.delete_rows_error', ['message' => '__MSG__']))
+                            : @js(__('assets.delete_row_error', ['message' => '__MSG__']));
+                        alert(template.replace('__MSG__', err.message));
                     }
                 },
 

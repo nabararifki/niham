@@ -28,6 +28,25 @@ class AssetImportController extends Controller
      */
     private const HEADER_ROW_LIMIT = 15;
 
+    /**
+     * Staging columns the review UI is permitted to write.
+     *
+     * Shared by the single-cell and bulk edit paths. field_name reaches SQL as a
+     * column name, so this is the injection barrier — and keeping one list means
+     * the bulk path can't quietly accept something the single path refuses.
+     */
+    private const EDITABLE_FIELDS = [
+        'tag', 'name', 'category_id', 'department_id', 'status',
+        'model', 'serial_number', 'purchase_date', 'purchase_cost', 'remarks',
+    ];
+
+    /**
+     * Selecting every row on a review page tops out at the 50/page slice. The
+     * cap is headroom against a future perPage, not a UI limit — it exists so a
+     * hand-rolled request can't hand us an unbounded IN list.
+     */
+    private const BULK_ROW_LIMIT = 200;
+
     private AssetImportService $importService;
 
     public function __construct(AssetImportService $importService)
@@ -794,10 +813,7 @@ class AssetImportController extends Controller
             $fieldName = $matches[1];
         }
 
-        // Whitelist of columns the user is permitted to edit via the review UI.
-        $allowedFields = ['tag', 'name', 'category_id', 'department_id', 'status',
-                          'model', 'serial_number', 'purchase_date', 'purchase_cost', 'remarks'];
-        if (!in_array($fieldName, $allowedFields, true)) {
+        if (!in_array($fieldName, self::EDITABLE_FIELDS, true)) {
             return response()->json(['success' => false, 'message' => 'Invalid field name.'], 422);
         }
 
@@ -878,6 +894,183 @@ class AssetImportController extends Controller
             'validCount'   => $validCount,
             'invalidCount' => $invalidCount,
         ]);
+    }
+
+    /**
+     * Reduce a client-supplied id list to the ones this user actually owns.
+     *
+     * Every bulk path funnels through here. The ids arrive from the browser, so
+     * this single query is what stands between a hand-edited request and another
+     * tenant's staging rows. Unowned ids are dropped silently rather than
+     * reported — the caller gets a count of what was touched, never a signal
+     * about whether an id it doesn't own exists.
+     *
+     * @param  array<int, mixed>  $rowIds
+     * @return array<int, int>
+     */
+    private function resolveOwnedRowIds(array $rowIds, int $userId, int $propertyId): array
+    {
+        $rowIds = array_slice(array_unique(array_map('intval', $rowIds)), 0, self::BULK_ROW_LIMIT);
+
+        if (empty($rowIds)) {
+            return [];
+        }
+
+        return \DB::table('temporary_asset_imports')
+            ->whereIn('id', $rowIds)
+            ->where('user_id', $userId)
+            ->where('property_id', $propertyId)
+            ->pluck('id')
+            ->map(fn ($id) => (int) $id)
+            ->all();
+    }
+
+    /**
+     * Re-derive is_invalid for a set of rows in one statement.
+     *
+     * Mirrors the per-row rule in updateSingleRow() exactly, including the part
+     * that is easy to miss: a row with neither name nor tag is treated as a
+     * blank placeholder and left VALID, not flagged. Two other places in this
+     * controller (post-mapping recalculation) use a simpler expression that
+     * marks such rows invalid — a pre-existing inconsistency. Bulk edit must
+     * agree with single edit, or the same data would flag differently depending
+     * on how many rows the user happened to select.
+     *
+     * @param  array<int, int>  $rowIds
+     */
+    private function recalculateInvalidFlags(array $rowIds): void
+    {
+        if (empty($rowIds)) {
+            return;
+        }
+
+        \DB::table('temporary_asset_imports')
+            ->whereIn('id', $rowIds)
+            ->update([
+                'is_invalid' => \DB::raw(
+                    "CASE
+                        WHEN (name IS NULL OR name = '') AND (tag IS NULL OR tag = '') THEN FALSE
+                        WHEN (name IS NULL OR name = '') OR category_id IS NULL         THEN TRUE
+                        ELSE FALSE
+                    END"
+                ),
+                'updated_at' => now(),
+            ]);
+    }
+
+    /**
+     * Global valid/invalid counts + heatmap pages for one user+property.
+     *
+     * Extracted from the three copies that already existed inline so the bulk
+     * endpoints report identically to the single-row ones.
+     *
+     * @return array<string, mixed>
+     */
+    private function stagingTotals(int $userId, int $propertyId): array
+    {
+        $baseQ = \DB::table('temporary_asset_imports')
+            ->where('user_id', $userId)->where('property_id', $propertyId);
+
+        $totalCount = $baseQ->clone()->count();
+        $validCount = $baseQ->clone()->where('is_invalid', false)
+            ->where(function ($q) { $q->whereNotNull('name')->where('name', '<>', ''); })->count();
+
+        return [
+            'totalCount'   => $totalCount,
+            'validCount'   => $validCount,
+            'invalidCount' => $totalCount - $validCount,
+            'invalidPages' => $this->invalidPageNumbers($baseQ, 50),
+        ];
+    }
+
+    /**
+     * AJAX: Apply one column's value across every selected staging row.
+     *
+     * Backs the bulk-edit inputs that appear in the review table's column
+     * headers once rows are selected. Deliberately one request for the whole
+     * selection: driving this through updateSingleRow() per row would reinstate
+     * the request-per-cell cost this feature already removed elsewhere.
+     *
+     * Only the named column is written. Every other column on the selected rows,
+     * and every unselected row, is left alone.
+     */
+    public function bulkUpdateRows(Request $request)
+    {
+        $request->validate([
+            'row_ids'    => 'required|array|min:1|max:'.self::BULK_ROW_LIMIT,
+            'row_ids.*'  => 'required|integer|min:1',
+            'field_name' => 'required|string',
+            'new_value'  => 'nullable|string',
+        ]);
+
+        $fieldName = $request->input('field_name');
+        $newValue  = $request->input('new_value');
+
+        if (!in_array($fieldName, self::EDITABLE_FIELDS, true)) {
+            return response()->json(['success' => false, 'message' => 'Invalid field name.'], 422);
+        }
+
+        $userId     = auth()->id();
+        $propertyId = auth()->user()->isSuperAdmin()
+            ? session('active_property_id')
+            : auth()->user()->property_id;
+
+        if (!$propertyId) {
+            return response()->json(['success' => false, 'message' => 'No active property.'], 403);
+        }
+
+        // Identical FK check to updateSingleRow(). Runs BEFORE any write, so a
+        // rejected value cannot land on part of the selection — and so the bulk
+        // path is not a way around a rule the single-cell path enforces.
+        if (in_array($fieldName, ['category_id', 'department_id']) && !empty($newValue)) {
+            $table  = $fieldName === 'category_id' ? 'categories' : 'departments';
+            $exists = \DB::table($table)
+                ->where('id', (int) $newValue)
+                ->where('property_id', $propertyId)
+                ->exists();
+            if (!$exists) {
+                return response()->json(['success' => false, 'message' => 'Invalid entity for this property.'], 422);
+            }
+        }
+
+        $ownedIds = $this->resolveOwnedRowIds($request->input('row_ids', []), $userId, (int) $propertyId);
+
+        if (empty($ownedIds)) {
+            return response()->json(array_merge(
+                ['success' => true, 'updatedCount' => 0, 'rowFlags' => []],
+                $this->stagingTotals($userId, (int) $propertyId)
+            ));
+        }
+
+        $updateValue = ($fieldName === 'category_id' || $fieldName === 'department_id')
+            ? (!empty($newValue) ? (int) $newValue : null)
+            : $newValue;
+
+        \DB::table('temporary_asset_imports')
+            ->whereIn('id', $ownedIds)
+            ->update([
+                $fieldName   => $updateValue,
+                'updated_at' => now(),
+            ]);
+
+        $this->recalculateInvalidFlags($ownedIds);
+
+        // Hand back each row's new flag so the page can repaint the invalid
+        // highlighting in place, without a reload that would drop the selection.
+        $rowFlags = \DB::table('temporary_asset_imports')
+            ->whereIn('id', $ownedIds)
+            ->pluck('is_invalid', 'id')
+            ->map(fn ($flag) => (bool) $flag)
+            ->all();
+
+        return response()->json(array_merge(
+            [
+                'success'      => true,
+                'updatedCount' => count($ownedIds),
+                'rowFlags'     => $rowFlags,
+            ],
+            $this->stagingTotals($userId, (int) $propertyId)
+        ));
     }
 
     /**
@@ -1021,15 +1214,22 @@ class AssetImportController extends Controller
     }
 
     /**
-     * AJAX: Delete a single staging row from temporary_asset_imports database table.
+     * AJAX: Delete the selected staging rows from temporary_asset_imports.
      *
-     * Addressed by id rather than page position, for the same reason as
-     * updateSingleRow() — see the note on that method.
+     * Takes a list because the review page deletes through the row selection —
+     * context menu or the "Delete Selected" button — and a single row is simply
+     * a selection of one. There is no separate single-row path to drift from.
+     *
+     * Rows are addressed by id, never by page position: an index is only valid
+     * until something before it is deleted, which is exactly the operation this
+     * method performs. Unowned ids are dropped by resolveOwnedRowIds() and
+     * reported only as a smaller deletedCount.
      */
-    public function deleteRow(Request $request)
+    public function deleteRows(Request $request)
     {
         $request->validate([
-            'row_id' => 'required|integer|min:1',
+            'row_ids'   => 'required|array|min:1|max:'.self::BULK_ROW_LIMIT,
+            'row_ids.*' => 'required|integer|min:1',
         ]);
 
         $userId     = auth()->id();
@@ -1041,40 +1241,16 @@ class AssetImportController extends Controller
             return response()->json(['success' => false, 'message' => 'No active property.'], 403);
         }
 
-        $stagingRow = \DB::table('temporary_asset_imports')
-            ->where('id', (int) $request->input('row_id'))
-            ->where('user_id', $userId)
-            ->where('property_id', $propertyId)
-            ->first();
+        $ownedIds = $this->resolveOwnedRowIds($request->input('row_ids', []), $userId, (int) $propertyId);
 
-        if (!$stagingRow) {
-            return response()->json(['success' => false, 'message' => 'Row not found.'], 422);
+        if (!empty($ownedIds)) {
+            \DB::table('temporary_asset_imports')->whereIn('id', $ownedIds)->delete();
         }
 
-        \DB::table('temporary_asset_imports')
-            ->where('id', $stagingRow->id)
-            ->where('user_id', $userId)
-            ->where('property_id', $propertyId)
-            ->delete();
-
-        // Recalculate global stats from DB using efficient count aggregation
-        $baseQ        = \DB::table('temporary_asset_imports')
-            ->where('user_id', $userId)->where('property_id', $propertyId);
-        $totalCount   = $baseQ->clone()->count();
-        $validCount   = $baseQ->clone()->where('is_invalid', false)
-            ->where(function ($q) { $q->whereNotNull('name')->where('name', '<>', ''); })->count();
-        $invalidCount = $totalCount - $validCount;
-
-        $perPage      = 50;
-        $invalidPages = $this->invalidPageNumbers($baseQ, $perPage);
-
-        return response()->json([
-            'success'      => true,
-            'totalCount'   => $totalCount,
-            'invalidPages' => $invalidPages,
-            'validCount'   => $validCount,
-            'invalidCount' => $invalidCount,
-        ]);
+        return response()->json(array_merge(
+            ['success' => true, 'deletedCount' => count($ownedIds)],
+            $this->stagingTotals($userId, (int) $propertyId)
+        ));
     }
 
 
