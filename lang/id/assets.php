@@ -118,6 +118,32 @@ return [
     'status_default_hint'               => 'Opsional. Baris yang kosong atau tidak dipetakan otomatis berstatus "In Service".',
     'smart_import_help'                 => 'Memetakan kolom otomatis dan menampilkan pratinjau sebelum data disimpan. Paling baik dengan kolom Tag, Nama Aset, dan Kategori.',
     'smart_import_help_department'      => 'Sertakan juga Departemen.',
+    // Kegagalan parsing. Job menyimpan kunci-nya; status() yang menerjemahkan,
+    // karena queue worker tidak punya sesi dan tidak tahu locale si pengimpor.
+    // Setiap <code> berpasangan dengan <code>_hint sebagai blok "kemungkinan solusi".
+    'import_error_unreadable'           => 'File ini tidak bisa dibaca.',
+    'import_error_unreadable_hint'      => 'File mungkin rusak, tidak lengkap, atau formatnya berbeda dari ekstensinya. Coba buka lalu simpan ulang sebagai .xlsx atau .csv, kemudian unggah lagi.',
+    'import_error_no_header'            => 'Baris header tidak ditemukan di file ini.',
+    'import_error_no_header_hint'       => '15 baris pertama tidak memuat judul kolom yang dikenali. Kalau tabel Anda mulai lebih ke bawah, pilih barisnya lewat selektor Baris Header lalu coba lagi.',
+    'import_error_file_missing'         => 'File yang diunggah sudah tidak tersedia.',
+    'import_error_file_missing_hint'    => 'Impor yang tidak selesai dibersihkan otomatis setelah satu jam. Silakan unggah file kembali.',
+    'import_error_no_property'          => 'Properti aktif untuk impor ini tidak bisa ditentukan.',
+    'import_error_no_property_hint'     => 'Pilih properti aktif, lalu coba lagi — file Anda masih tersimpan.',
+    'import_error_interrupted'          => 'Impor berhenti sebelum selesai.',
+    'import_error_interrupted_hint'     => 'Biasanya ini berarti worker latar belakang restart atau kehabisan waktu. Mencoba lagi aman — belum ada data yang tersimpan.',
+    'import_error_generic'              => 'Terjadi kesalahan saat membaca file ini.',
+    'import_error_generic_hint'         => 'Mencoba lagi sering menyelesaikannya. Kalau tetap gagal, pastikan file terbuka normal di Excel dan sheet serta baris header sudah benar.',
+    'import_timed_out'                  => 'Impor terlalu lama tidak merespons.',
+    'import_timed_out_hint'             => 'Worker latar belakang mungkin tidak berjalan. File Anda masih tersimpan — coba lagi setelah worker aktif.',
+    'possible_solutions'                => 'Kemungkinan solusi',
+    'retry_import'                      => 'Coba Lagi',
+    // Pemilihan baris header manual
+    'header_row'                        => 'Baris Header',
+    'header_row_auto'                   => 'Otomatis',
+    'header_row_option'                 => 'Baris :number',
+    'select_sheet_and_header'           => 'Sheet & baris header',
+    'header_row_help'                   => 'Baris yang memuat judul kolom Anda. Biarkan Otomatis kecuali kolom yang terdeteksi terlihat keliru.',
+    'header_row_invalid'                => 'Baris :row tidak bisa dipakai sebagai header — baris itu kosong atau di luar sheet ini. Deteksi otomatis tetap berlaku.',
 ];
 
 

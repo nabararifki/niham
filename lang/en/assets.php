@@ -118,6 +118,32 @@ return [
     'status_default_hint'               => 'Optional. Rows left blank or unmapped default to "In Service".',
     'smart_import_help'                 => 'Auto-maps your columns and lets you review the data before saving. Works best with Tag, Asset Name and Category columns.',
     'smart_import_help_department'      => 'Add Department too.',
+    // Parse failures. The job stores the key; status() translates it, because the
+    // queue worker has no session and cannot know the importer's locale.
+    // Each <code> pairs with a <code>_hint used as the "possible solutions" block.
+    'import_error_unreadable'           => 'We could not read this file.',
+    'import_error_unreadable_hint'      => 'It may be corrupted, incomplete, or saved in a different format than its extension suggests. Try opening it and re-saving as .xlsx or .csv, then upload again.',
+    'import_error_no_header'            => 'No header row could be found in this file.',
+    'import_error_no_header_hint'       => 'The first 15 rows contain no recognisable column titles. If your table starts further down, pick the correct row using the Header Row selector and try again.',
+    'import_error_file_missing'         => 'The uploaded file is no longer available.',
+    'import_error_file_missing_hint'    => 'Unfinished imports are cleaned up automatically after an hour. Please upload the file again.',
+    'import_error_no_property'          => 'No active property could be determined for this import.',
+    'import_error_no_property_hint'     => 'Select an active property, then retry — your file is still here.',
+    'import_error_interrupted'          => 'The import stopped before it finished.',
+    'import_error_interrupted_hint'     => 'This usually means the background worker restarted or ran out of time. Retrying is safe — nothing was saved.',
+    'import_error_generic'              => 'Something went wrong while reading this file.',
+    'import_error_generic_hint'         => 'Retrying often resolves it. If it keeps failing, check that the file opens correctly in Excel and that the sheet and header row are set right.',
+    'import_timed_out'                  => 'The import took too long to respond.',
+    'import_timed_out_hint'             => 'The background worker may not be running. Your file is still here — retry once it is available again.',
+    'possible_solutions'                => 'Possible solutions',
+    'retry_import'                      => 'Retry',
+    // Manual header row selection
+    'header_row'                        => 'Header Row',
+    'header_row_auto'                   => 'Auto',
+    'header_row_option'                 => 'Row :number',
+    'select_sheet_and_header'           => 'Sheet & header row',
+    'header_row_help'                   => 'Which row holds your column titles. Leave on Auto unless the detected columns look wrong.',
+    'header_row_invalid'                => 'Row :row could not be used as a header — it is empty or outside this sheet. Auto-detection is still in effect.',
 ];
 
 

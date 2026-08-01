@@ -35,9 +35,12 @@ class AssetImportService
      * FASE 1: Buka file sementara, ambil sampel 15 baris, cari True Header,
      * dan jalankan Hybrid Matching Pipeline.
      *
-     * @param int $sheetIndex Zero-based index of the sheet to extract from (default: 0)
+     * @param int      $sheetIndex      Zero-based index of the sheet to extract from (default: 0)
+     * @param int|null $headerRowIndex  Zero-based row to force as the header. Null runs the
+     *                                  heuristic. Lets the user override a wrong guess on files
+     *                                  with title banners or legend blocks above the real table.
      */
-    public function peek(string $filePath, string $extension, int $sheetIndex = 0): array
+    public function peek(string $filePath, string $extension, int $sheetIndex = 0, ?int $headerRowIndex = null): array
     {
         $options = $extension === 'csv' ? new CsvOptions() : new XlsxOptions();
         $reader = $extension === 'csv' ? new CsvReader($options) : new XlsxReader($options);
@@ -74,14 +77,26 @@ class AssetImportService
         $reader->close();
 
         // 1. True Header Detection (Baris dengan cell non-empty terbanyak)
-        $trueHeaderIndex = 0;
-        $maxCells = -1;
+        //
+        // Bila user memilih baris header secara manual, heuristik ini dilewati
+        // sepenuhnya — tapi HANYA titik ini yang berbeda. Sanitasi header, offset
+        // preview (+1), dan generateMappingProposals() di bawah tetap satu jalur
+        // untuk auto maupun manual, supaya keduanya tidak bisa menyimpang.
+        if ($headerRowIndex !== null) {
+            if ($headerRowIndex < 0 || $headerRowIndex >= count($firstSheetRows)) {
+                throw new Exception('Selected header row is outside the first 15 rows of this sheet.');
+            }
+            $trueHeaderIndex = $headerRowIndex;
+        } else {
+            $trueHeaderIndex = 0;
+            $maxCells = -1;
 
-        foreach ($firstSheetRows as $idx => $row) {
-            $nonEmptyCount = count(array_filter($row, fn($cell) => trim($cell) !== ''));
-            if ($nonEmptyCount > $maxCells) {
-                $maxCells = $nonEmptyCount;
-                $trueHeaderIndex = $idx;
+            foreach ($firstSheetRows as $idx => $row) {
+                $nonEmptyCount = count(array_filter($row, fn($cell) => trim($cell) !== ''));
+                if ($nonEmptyCount > $maxCells) {
+                    $maxCells = $nonEmptyCount;
+                    $trueHeaderIndex = $idx;
+                }
             }
         }
 

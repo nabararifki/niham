@@ -605,9 +605,11 @@ class SmartImportTest extends TestCase
 
         // Mock the AssetImportService
         $this->mock(AssetImportService::class, function ($mock) {
+            // The 4th argument is the manual header-row override; null here means
+            // auto-detection, which is what a plain sheet switch must keep using.
             $mock->shouldReceive('peek')
                 ->once()
-                ->with(\Illuminate\Support\Facades\Storage::disk('local')->path('temp/test_import.xlsx'), 'xlsx', 1)
+                ->with(\Illuminate\Support\Facades\Storage::disk('local')->path('temp/test_import.xlsx'), 'xlsx', 1, null)
                 ->andReturn([
                     'sheets' => ['Sheet1', 'Sheet2'],
                     'true_header' => ['New Header'],
@@ -1375,6 +1377,425 @@ class SmartImportTest extends TestCase
         $this->get(route('assets.index'))->assertSee($idText, false);
 
         $this->assertNotEquals($enText, $idText, 'The tooltip must be genuinely translated, not hardcoded.');
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // 8. PARSE FAILURE RECOVERY (keep the file, name the cause)
+    // ══════════════════════════════════════════════════════════════
+
+    /** Seed the progress record the way processMapping() does, for a given attempt. */
+    private function seedProgress(string $attemptId, string $status = 'processing'): void
+    {
+        Cache::put('import_progress_' . $this->userA->id, [
+            'status'     => $status,
+            'percentage' => 0,
+            'processed'  => 0,
+            'total'      => 0,
+            'error'      => '',
+            'import_id'  => $attemptId,
+        ], 600);
+    }
+
+    /**
+     * A file the reader cannot open at all: an .xlsx extension over bytes that
+     * are not a ZIP container. This is the single most common real failure —
+     * a .csv renamed to .xlsx, or a truncated upload.
+     */
+    public function test_failed_import_keeps_the_temp_file_for_retry(): void
+    {
+        $this->actingAs($this->userA);
+
+        $path = 'temp/import_dead01.xlsx';
+        \Illuminate\Support\Facades\Storage::disk('local')->put($path, 'this is definitely not a zip container');
+        $this->seedImportState($path);
+        $this->seedProgress('attempt-fail');
+
+        (new ProcessImportJob(
+            $this->userA->id,
+            $path,
+            $this->mappingPayload($path),
+            0,
+            'attempt-fail',
+        ))->handle();
+
+        $this->assertTrue(
+            \Illuminate\Support\Facades\Storage::disk('local')->exists($path),
+            'A failed parse deleted the temp file, forcing the user to upload it again.'
+        );
+
+        $progress = Cache::get('import_progress_' . $this->userA->id);
+        $this->assertSame('failed', $progress['status']);
+        $this->assertSame('import_error_unreadable', $progress['error_code'] ?? null);
+    }
+
+    /**
+     * The end-to-end promise of this change: a failure the user can recover from
+     * without re-uploading.
+     *
+     * The failure here is deliberately *transient* rather than a bad file — the
+     * import_state cache lost its property_id, which is what happens when a
+     * super-admin's session property goes away mid-import. The file is fine; only
+     * the surrounding state was broken, so a retry against the very same path
+     * must work once that state is repaired.
+     */
+    public function test_retry_after_failure_succeeds_with_the_same_file(): void
+    {
+        $superAdmin = User::factory()->create([
+            'property_id'    => null,
+            'role_id'        => null,
+            'department_id'  => null,
+            'is_super_admin' => true,
+        ]);
+        $this->actingAs($superAdmin);
+
+        $path = 'temp/import_beef01.csv';
+        \Illuminate\Support\Facades\Storage::disk('local')->put(
+            $path,
+            "Tag,Name\nR-1,Retry One\nR-2,Retry Two\n"
+        );
+
+        $stateKey    = 'import_state_' . $superAdmin->id;
+        $progressKey = 'import_progress_' . $superAdmin->id;
+        $baseState   = [
+            'temp_file_path'      => $path,
+            'sheets'              => ['Sheet1'],
+            'true_header'         => ['Tag', 'Name'],
+            'preview_data'        => [],
+            'mapping_proposals'   => [],
+            'current_sheet_index' => 0,
+        ];
+
+        // ── Attempt 1: no property_id anywhere → the job cannot resolve a tenant ──
+        Cache::put($stateKey, $baseState, 1800);
+        Cache::put($progressKey, [
+            'status' => 'processing', 'percentage' => 0, 'processed' => 0,
+            'total' => 0, 'error' => '', 'import_id' => 'attempt-1',
+        ], 600);
+
+        (new ProcessImportJob($superAdmin->id, $path, $this->mappingPayload($path), 0, 'attempt-1'))->handle();
+
+        $failed = Cache::get($progressKey);
+        $this->assertSame('failed', $failed['status']);
+        $this->assertSame('import_error_no_property', $failed['error_code'] ?? null);
+        $this->assertTrue(
+            \Illuminate\Support\Facades\Storage::disk('local')->exists($path),
+            'The file must survive the failure — it is the whole point of the retry.'
+        );
+        $this->assertSame(0, \DB::table('temporary_asset_imports')->count());
+
+        // ── Retry: repair the state exactly as processMapping() would, same file ──
+        Cache::put($stateKey, $baseState + ['property_id' => $this->propertyA->id], 1800);
+        Cache::put($progressKey, [
+            'status' => 'processing', 'percentage' => 0, 'processed' => 0,
+            'total' => 0, 'error' => '', 'import_id' => 'attempt-2',
+        ], 600);
+
+        (new ProcessImportJob($superAdmin->id, $path, $this->mappingPayload($path), 0, 'attempt-2'))->handle();
+
+        $this->assertSame('completed', Cache::get($progressKey)['status']);
+        $this->assertSame(
+            ['Retry One', 'Retry Two'],
+            \DB::table('temporary_asset_imports')
+                ->where('user_id', $superAdmin->id)
+                ->orderBy('id')
+                ->pluck('name')
+                ->toArray(),
+            'The retry did not ingest the already-uploaded file.'
+        );
+    }
+
+    /**
+     * The job runs in a queue worker with no HTTP session, so __() inside it
+     * resolves against the default locale, not the user's. It therefore stores a
+     * locale-independent code and status() — which does run in the user's request
+     * — does the translating.
+     */
+    public function test_status_endpoint_localizes_the_failure_message(): void
+    {
+        $this->actingAs($this->userA);
+
+        Cache::put('import_progress_' . $this->userA->id, [
+            'status'     => 'failed',
+            'percentage' => 0,
+            'processed'  => 0,
+            'total'      => 0,
+            'error'      => '',
+            'error_code' => 'import_error_unreadable',
+            'import_id'  => 'attempt-x',
+        ], 600);
+
+        app()->setLocale('en');
+        $en = $this->getJson(route('assets.import-status'))->assertStatus(200)->json();
+
+        app()->setLocale('id');
+        $id = $this->getJson(route('assets.import-status'))->assertStatus(200)->json();
+
+        $this->assertSame(__('assets.import_error_unreadable', [], 'en'), $en['error']);
+        $this->assertSame(__('assets.import_error_unreadable', [], 'id'), $id['error']);
+        $this->assertNotEquals($en['error'], $id['error'], 'The failure message must be genuinely translated.');
+
+        // The guidance block the modal renders under the message.
+        $this->assertNotEmpty($en['error_hint']);
+        $this->assertNotEquals($en['error_hint'], $id['error_hint']);
+
+        // Internal bookkeeping must not leak to the browser.
+        $this->assertArrayNotHasKey('error_code', $en);
+        $this->assertArrayNotHasKey('import_id', $en);
+    }
+
+    /**
+     * A file whose rows never match the expected header used to "succeed" with
+     * zero rows — an empty review page with no explanation.
+     */
+    public function test_missing_header_reports_a_distinct_error_code(): void
+    {
+        $this->actingAs($this->userA);
+
+        $path = 'temp/import_nohdr1.csv';
+        \Illuminate\Support\Facades\Storage::disk('local')->put($path, "Foo\nBar\nBaz\n");
+        $this->seedImportState($path);
+        $this->seedProgress('attempt-nohdr');
+
+        (new ProcessImportJob(
+            $this->userA->id,
+            $path,
+            $this->mappingPayload($path),
+            0,
+            'attempt-nohdr',
+        ))->handle();
+
+        $progress = Cache::get('import_progress_' . $this->userA->id);
+        $this->assertSame('failed', $progress['status']);
+        $this->assertSame('import_error_no_header', $progress['error_code'] ?? null);
+        $this->assertTrue(\Illuminate\Support\Facades\Storage::disk('local')->exists($path));
+    }
+
+    /**
+     * The raw exception text must never reach the browser — it leaks absolute
+     * server paths and library internals, and is untranslatable.
+     */
+    public function test_failure_message_is_not_a_raw_exception_string(): void
+    {
+        $this->actingAs($this->userA);
+
+        $path = 'temp/import_dead02.xlsx';
+        \Illuminate\Support\Facades\Storage::disk('local')->put($path, 'not a zip');
+        $this->seedImportState($path);
+        $this->seedProgress('attempt-raw');
+
+        (new ProcessImportJob(
+            $this->userA->id,
+            $path,
+            $this->mappingPayload($path),
+            0,
+            'attempt-raw',
+        ))->handle();
+
+        $error = $this->getJson(route('assets.import-status'))->json('error');
+
+        $this->assertNotEmpty($error);
+        $this->assertStringNotContainsString('/', $error, 'A filesystem path leaked into the user-facing error.');
+        $this->assertStringNotContainsString('Exception', $error);
+        $this->assertStringNotContainsString('OpenSpout', $error);
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // 9. MANUAL HEADER ROW SELECTION
+    // ══════════════════════════════════════════════════════════════
+
+    /**
+     * A file whose real table starts at row 3, under a two-row preamble. Both
+     * preamble rows are booby-trapped, each defeating a *different* detector:
+     *
+     *  - Row 1 is WIDER than the real header (5 filled cells vs 3), so
+     *    peek()'s "most non-empty cells" heuristic picks it.
+     *  - Row 2 is a legend naming two of the real columns, so it intersects the
+     *    expected header on 2 cells — which is exactly ProcessImportJob's
+     *    content-matching threshold. The job latches onto it and treats the real
+     *    header row as a data row.
+     *
+     * Without both traps a manual override looks like it works while the job
+     * quietly re-derives the right answer on its own, and the test proves nothing.
+     */
+    private function seedBannerFile(string $hexId): string
+    {
+        $csv = "ASSET REGISTER,FY2026,CONFIDENTIAL,PAGE 1,DRAFT\n"
+             . "Columns used:,Tag,Name\n"
+             . "Tag,Name,Category\n"
+             . "B-1,Banner One,Electronics A\n"
+             . "B-2,Banner Two,Electronics A\n";
+
+        $path = 'temp/import_' . $hexId . '.csv';
+        \Illuminate\Support\Facades\Storage::disk('local')->put($path, $csv);
+
+        Cache::put('import_state_' . $this->userA->id, [
+            'temp_file_path'      => $path,
+            'sheets'              => ['Sheet1'],
+            'true_header'         => ['ASSET REGISTER', 'FY2026', 'CONFIDENTIAL', 'PAGE 1', 'DRAFT'],
+            'preview_data'        => [],
+            'mapping_proposals'   => [],
+            'current_sheet_index' => 0,
+            'header_row_choice'   => 'auto',
+            'header_row_index'    => null,
+        ], 1800);
+
+        return $path;
+    }
+
+    public function test_auto_header_detection_is_unchanged_without_the_parameter(): void
+    {
+        $this->actingAs($this->userA);
+        $this->seedBannerFile('ba0001');
+
+        $this->get(route('assets.import-mapping'))->assertStatus(200);
+
+        $state = Cache::get('import_state_' . $this->userA->id);
+
+        // Untouched: no re-peek runs, and auto remains in effect.
+        $this->assertNull($state['header_row_index']);
+        $this->assertSame('auto', $state['header_row_choice']);
+    }
+
+    public function test_manual_header_row_overrides_the_heuristic(): void
+    {
+        $this->actingAs($this->userA);
+        $this->seedBannerFile('ba0002');
+
+        // Row 3 (1-based) is the real header.
+        $this->get(route('assets.import-mapping', ['header_row' => 3]))->assertStatus(200);
+
+        $state = Cache::get('import_state_' . $this->userA->id);
+
+        $this->assertSame(['Tag', 'Name', 'Category'], $state['true_header']);
+        $this->assertSame(2, $state['header_row_index'], 'Stored index must be 0-based.');
+        $this->assertSame('3', $state['header_row_choice'], 'The raw 1-based choice repopulates the select.');
+
+        // Data starts on the row after the header — the same +1 offset auto uses.
+        $this->assertSame(
+            [
+                ['Tag' => 'B-1', 'Name' => 'Banner One', 'Category' => 'Electronics A'],
+                ['Tag' => 'B-2', 'Name' => 'Banner Two', 'Category' => 'Electronics A'],
+            ],
+            $state['preview_data']
+        );
+
+        // And the heuristic really would have got it wrong left alone.
+        $this->assertNotContains('Tag', ['ASSET REGISTER', 'FY2026', 'CONFIDENTIAL', 'PAGE 1', 'DRAFT']);
+    }
+
+    /**
+     * The header index has to reach ProcessImportJob, not just the preview. The
+     * job re-finds the header by content, so without the explicit index it would
+     * ingest the banner rows as data.
+     */
+    public function test_manual_header_row_shifts_the_data_offset_in_the_job(): void
+    {
+        $this->actingAs($this->userA);
+        $path = $this->seedBannerFile('ba0003');
+
+        $this->get(route('assets.import-mapping', ['header_row' => 3]))->assertStatus(200);
+
+        $this->postJson(route('assets.import.process-mapping'), [
+            'payload' => json_encode([
+                'temp_file_path' => $path,
+                'selected_sheet' => 0,
+                'mapping'        => [
+                    'tag'      => ['columns' => ['Tag'], 'separator' => ' '],
+                    'name'     => ['columns' => ['Name'], 'separator' => ' '],
+                    'category' => ['columns' => ['Category'], 'separator' => ' '],
+                ],
+            ]),
+        ])->assertStatus(200);
+
+        $names = \DB::table('temporary_asset_imports')
+            ->where('user_id', $this->userA->id)
+            ->orderBy('id')
+            ->pluck('name')
+            ->toArray();
+
+        $this->assertSame(['Banner One', 'Banner Two'], $names);
+        $this->assertNotContains(
+            'Name',
+            $names,
+            'The real header row was ingested as data — the job fell back to content matching '
+            . 'and latched onto the legend row above it.'
+        );
+
+        // The progress total must count against the same offset, or the bar lies.
+        $this->assertSame(2, Cache::get('import_progress_' . $this->userA->id)['total']);
+    }
+
+    public function test_invalid_header_row_selection_warns_instead_of_silently_doing_nothing(): void
+    {
+        $this->actingAs($this->userA);
+        $this->seedBannerFile('ba0004');
+
+        // Row 12 exists in neither this 5-row file nor the peek sample.
+        $this->get(route('assets.import-mapping', ['header_row' => 12]))
+            ->assertStatus(200)
+            ->assertSee(__('assets.header_row_invalid', ['row' => 12]), false);
+
+        // Auto-detection stays in force rather than leaving a broken selection.
+        $this->assertNull(Cache::get('import_state_' . $this->userA->id)['header_row_index']);
+    }
+
+    public function test_single_sheet_file_hides_the_sheet_selector_but_keeps_header_row(): void
+    {
+        $this->actingAs($this->userA);
+        $this->seedBannerFile('ba0005');
+
+        $html = $this->get(route('assets.import-mapping'))->assertStatus(200)->getContent();
+
+        // The sheet <select> is behind x-if="hasMultipleSheets"; the header row one
+        // is unconditional, so only the latter may be present for a 1-sheet file.
+        $this->assertStringContainsString('id="headerRowSelector"', $html);
+        $this->assertStringContainsString('hasMultipleSheets', $html);
+        $this->assertStringContainsString(__('assets.header_row_auto'), $html);
+        $this->assertStringContainsString(__('assets.header_row_option', ['number' => 15]), $html);
+    }
+
+    public function test_header_row_labels_follow_the_active_locale(): void
+    {
+        $this->actingAs($this->userA);
+        $this->seedBannerFile('ba0006');
+
+        app()->setLocale('en');
+        $en = __('assets.header_row_auto');
+        $this->get(route('assets.import-mapping'))->assertSee($en, false);
+
+        app()->setLocale('id');
+        $id = __('assets.header_row_auto');
+        $this->get(route('assets.import-mapping'))->assertSee($id, false);
+
+        $this->assertNotEquals($en, $id, 'The header row control must be genuinely translated.');
+    }
+
+    /**
+     * The failure UI is only useful if it actually renders: the guidance block and
+     * the retry affordance both have to reach the page, in the active locale.
+     */
+    public function test_failure_ui_renders_retry_and_guidance_in_the_active_locale(): void
+    {
+        $this->actingAs($this->userA);
+        $this->seedBannerFile('ba0007');
+
+        app()->setLocale('en');
+        $this->get(route('assets.import-mapping'))
+            ->assertStatus(200)
+            ->assertSee(__('assets.retry_import'), false)
+            ->assertSee(__('assets.possible_solutions'), false)
+            ->assertSee(__('assets.import_timed_out'), false);
+
+        app()->setLocale('id');
+        $this->get(route('assets.import-mapping'))
+            ->assertStatus(200)
+            ->assertSee(__('assets.retry_import'), false)
+            ->assertSee(__('assets.possible_solutions'), false);
+
+        $this->assertNotEquals(
+            __('assets.possible_solutions', [], 'en'),
+            __('assets.possible_solutions', [], 'id')
+        );
     }
 }
 

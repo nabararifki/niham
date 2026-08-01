@@ -20,6 +20,14 @@ class AssetImportController extends Controller
 {
     use SanitizesImportDates;
 
+    /**
+     * How many rows the Header Row selector offers.
+     *
+     * Matches the 15-row sample AssetImportService::peek() reads — offering a row
+     * the peek never looked at would just produce an out-of-range error.
+     */
+    private const HEADER_ROW_LIMIT = 15;
+
     private AssetImportService $importService;
 
     public function __construct(AssetImportService $importService)
@@ -68,6 +76,10 @@ class AssetImportController extends Controller
                 'preview_data'      => $peekResult['preview_data'],
                 'mapping_proposals' => $peekResult['mapping_proposals'],
                 'current_sheet_index' => 0,
+                // A fresh upload always starts on auto-detection; the user only
+                // overrides it if the guess turns out wrong.
+                'header_row_index'  => null,
+                'header_row_choice' => 'auto',
             ];
 
             Cache::put('import_state_' . auth()->id(), $dataArray, 1800);
@@ -111,58 +123,92 @@ class AssetImportController extends Controller
                 ->with('warning', __('assets.import_parse_error', ['message' => __('assets.temporary_file_missing')]));
         }
 
-        // If user selected a different sheet, re-peek the file for that sheet
-        if ($request->has('sheet') && !empty($cachedData['temp_file_path'])) {
-            $requestedSheet = $request->query('sheet');
-            
-            // Resolve requested sheet index (could be integer index or name)
+        // Re-peek when the user changed the sheet, the header row, or both.
+        //
+        // Both controls navigate here with query parameters rather than posting to
+        // an endpoint of their own — the sheet selector has always worked this way,
+        // and giving the header row its own path would mean two re-peek code paths
+        // that can drift apart.
+        $peekWarning = null;
+
+        if ($request->has('sheet') || $request->has('header_row')) {
+            // ── Resolve the requested sheet (index or name) ────────────────
+            $sheetsList     = $cachedData['sheets'] ?? [];
+            $currentSheetVal = $cachedData['selected_sheet']
+                ?? $cachedData['current_sheet_index']
+                ?? 0;
+
+            $requestedSheet = $request->has('sheet') ? $request->query('sheet') : $currentSheetVal;
+
             $sheetIndex = 0;
-            $sheetsList = $cachedData['sheets'] ?? [];
             if (is_numeric($requestedSheet)) {
                 $sheetIndex = (int) $requestedSheet;
             } else {
-                // If it is a string sheet name, find its index in the sheets list
                 $foundIndex = array_search($requestedSheet, $sheetsList);
                 if ($foundIndex !== false) {
                     $sheetIndex = $foundIndex;
                 }
             }
 
-            // Get currently active sheet from cache
-            $currentSheetVal = isset($cachedData['selected_sheet']) 
-                ? $cachedData['selected_sheet'] 
-                : (isset($cachedData['current_sheet_index']) ? $cachedData['current_sheet_index'] : 0);
+            $sheetChanged = is_numeric($requestedSheet) && is_numeric($currentSheetVal)
+                ? ((int) $requestedSheet !== (int) $currentSheetVal)
+                : ($requestedSheet != $currentSheetVal);
 
-            // Compare requested sheet with current sheet
-            $isDifferent = false;
-            if (is_numeric($requestedSheet) && is_numeric($currentSheetVal)) {
-                $isDifferent = ((int)$requestedSheet !== (int)$currentSheetVal);
-            } else {
-                $isDifferent = ($requestedSheet != $currentSheetVal);
+            // ── Resolve the requested header row ──────────────────────────
+            // The UI is 1-based ("Row 3") and offers 'auto'; internally the row is
+            // a 0-based index and 'auto' is null, meaning "run the heuristic".
+            $currentChoice   = $cachedData['header_row_choice'] ?? 'auto';
+            $requestedChoice = $request->has('header_row')
+                ? (string) $request->query('header_row')
+                : (string) $currentChoice;
+
+            $headerRowIndex = null;
+            if ($requestedChoice !== 'auto') {
+                $rowNumber = (int) $requestedChoice;
+                if ($rowNumber < 1 || $rowNumber > self::HEADER_ROW_LIMIT) {
+                    $requestedChoice = 'auto';
+                } else {
+                    $headerRowIndex = $rowNumber - 1;
+                }
             }
 
-            if ($isDifferent) {
-                $tempFilePath = $cachedData['temp_file_path'];
+            $headerChanged = $requestedChoice !== (string) $currentChoice;
+
+            if ($sheetChanged || $headerChanged) {
                 if (\Illuminate\Support\Facades\Storage::disk('local')->exists($tempFilePath)) {
-                    $fullPath = \Illuminate\Support\Facades\Storage::disk('local')->path($tempFilePath);
+                    $fullPath  = \Illuminate\Support\Facades\Storage::disk('local')->path($tempFilePath);
                     $extension = pathinfo($fullPath, PATHINFO_EXTENSION);
 
                     try {
-                        $peekResult = $this->importService->peek($fullPath, $extension, $sheetIndex);
-                        $cachedData['true_header'] = $peekResult['true_header'];
-                        $cachedData['preview_data'] = $peekResult['preview_data'];
+                        $peekResult = $this->importService->peek($fullPath, $extension, $sheetIndex, $headerRowIndex);
+                        $cachedData['true_header']       = $peekResult['true_header'];
+                        $cachedData['preview_data']      = $peekResult['preview_data'];
                         $cachedData['mapping_proposals'] = $peekResult['mapping_proposals'];
                         $cachedData['current_sheet_index'] = $sheetIndex;
-                        $cachedData['selected_sheet'] = $requestedSheet;
-                        
-                        // Update cache with fresh sheet data
+                        $cachedData['selected_sheet']      = $requestedSheet;
+                        // header_row_index is what ProcessImportJob reads; the choice
+                        // is what repopulates the select on the next render.
+                        $cachedData['header_row_index']  = $headerRowIndex;
+                        $cachedData['header_row_choice'] = $requestedChoice;
+
                         Cache::put($cacheKey, $cachedData, 1800);
                     } catch (\Exception $e) {
-                        Log::warning('Sheet re-peek failed: ' . $e->getMessage());
+                        Log::warning('Sheet/header re-peek failed: ' . $e->getMessage());
+
+                        // A manual header pick that lands on a blank row would
+                        // otherwise look like a broken control: the page reloads,
+                        // nothing changes, and nothing says why.
+                        if ($headerRowIndex !== null) {
+                            $peekWarning = __('assets.header_row_invalid', ['row' => $headerRowIndex + 1]);
+                        }
                     }
                 }
             }
         }
+
+        $cachedData['header_row_choice'] = $cachedData['header_row_choice'] ?? 'auto';
+        $cachedData['header_row_limit']  = self::HEADER_ROW_LIMIT;
+        $cachedData['header_row_warning'] = $peekWarning;
 
         return view('assets.import.mapping-page', $cachedData);
     }
@@ -305,7 +351,8 @@ class AssetImportController extends Controller
                 'percentage' => 0,
                 'processed'  => 0,
                 'total'      => 0,
-                'error'      => $e->getMessage(),
+                'error'      => '',
+                'error_code' => \App\Exceptions\ImportFailure::GENERIC,
                 'import_id'  => $attemptId,
             ], 600);
 
@@ -332,6 +379,7 @@ class AssetImportController extends Controller
             'processed'  => 0,
             'total'      => 0,
             'error'      => '',
+            'error_hint' => '',
         ];
 
         $progress = Cache::get('import_progress_' . auth()->id());
@@ -343,7 +391,22 @@ class AssetImportController extends Controller
         // Normalise onto the full shape — writers have historically stored partial
         // records — and keep import_id internal; it is bookkeeping for the worker,
         // not something the progress modal needs.
-        return response()->json(array_merge($default, Arr::except($progress, ['import_id'])));
+        $payload = array_merge($default, Arr::except($progress, ['import_id', 'error_code']));
+
+        // ProcessImportJob runs in a queue worker with no session, so it cannot
+        // resolve the importer's locale. It stores a translation key instead and
+        // this request — which *does* have the locale — turns it into prose.
+        //
+        // A record with a free-text 'error' and no code is left untouched: records
+        // written before this change are still in cache during a deploy, and a
+        // stale English sentence beats a blank error box.
+        $code = $progress['error_code'] ?? null;
+        if ($code) {
+            $payload['error']      = __('assets.' . $code);
+            $payload['error_hint'] = __('assets.' . $code . '_hint');
+        }
+
+        return response()->json($payload);
     }
 
     /**

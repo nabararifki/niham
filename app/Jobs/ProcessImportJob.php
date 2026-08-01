@@ -11,6 +11,7 @@ use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\DB;
+use App\Exceptions\ImportFailure;
 use App\Models\User;
 use App\Traits\SanitizesImportDates;
 
@@ -90,8 +91,13 @@ class ProcessImportJob implements ShouldQueue
 
     /**
      * Update progress in cache. No-op once this attempt is no longer current.
+     *
+     * $errorCode is a translation key, never prose: this runs in a queue worker
+     * with no session, so it cannot know the importer's locale. status() resolves
+     * it. The raw exception text stays in the log, where it is useful and where
+     * leaking absolute server paths is harmless.
      */
-    private function setProgress(string $status, int $processed, int $total, string $error = ''): void
+    private function setProgress(string $status, int $processed, int $total, ?string $errorCode = null): void
     {
         if (! $this->isCurrentAttempt()) {
             return;
@@ -104,9 +110,34 @@ class ProcessImportJob implements ShouldQueue
             'percentage' => $percentage,
             'processed'  => $processed,
             'total'      => $total,
-            'error'      => $error,
+            'error'      => '',
+            'error_code' => $errorCode,
             'import_id'  => $this->attemptId,
         ], self::CACHE_TTL);
+    }
+
+    /**
+     * Reduce a thrown error to one of the codes the UI knows how to explain.
+     *
+     * Only distinctions that are cheap *and* actionable earn their own code —
+     * telling someone their file is not a readable spreadsheet suggests a
+     * different fix than telling them no header row could be found.
+     */
+    private function classifyFailure(\Throwable $e): string
+    {
+        if ($e instanceof ImportFailure) {
+            return $e->code_;
+        }
+
+        // OpenSpout throws these for anything from a truncated upload to a .csv
+        // renamed .xlsx. Both reader families share the same base exception.
+        if ($e instanceof \OpenSpout\Common\Exception\IOException
+            || $e instanceof \OpenSpout\Reader\Exception\ReaderException
+            || $e instanceof \OpenSpout\Common\Exception\UnsupportedTypeException) {
+            return ImportFailure::UNREADABLE;
+        }
+
+        return ImportFailure::GENERIC;
     }
 
     /**
@@ -126,7 +157,7 @@ class ProcessImportJob implements ShouldQueue
                 'trace'   => $e->getTraceAsString(),
             ]);
 
-            $this->setProgress('failed', 0, 0, $e->getMessage());
+            $this->setProgress('failed', 0, 0, $this->classifyFailure($e));
         } finally {
             // Only the current attempt is allowed to clean up.
             //
@@ -137,14 +168,10 @@ class ProcessImportJob implements ShouldQueue
             // temp_file_path), and deleting it would break the live import.
             // Whatever is left behind is swept hourly by app:clean-abandoned-imports.
             if ($this->isCurrentAttempt()) {
-                try {
-                    if (Storage::disk('local')->exists($this->tempFilePath)) {
-                        Storage::disk('local')->delete($this->tempFilePath);
-                    }
-                } catch (\Throwable $cleanupErr) {
-                    Log::warning('Failed to cleanup temp file: ' . $cleanupErr->getMessage());
-                }
-
+                // Settle the terminal status BEFORE deciding about the file. A job
+                // that fell out of processFile() without a verdict is a failure, and
+                // failures keep their file — reversing this order would delete it and
+                // only then admit the import failed.
                 $currentProgress = Cache::get($this->progressKey());
                 if (is_array($currentProgress) && !in_array($currentProgress['status'] ?? '', ['completed', 'failed'], true)) {
                     Log::warning('ProcessImportJob ended without terminal status. Forcing failed.', [
@@ -155,8 +182,24 @@ class ProcessImportJob implements ShouldQueue
                         'failed',
                         $currentProgress['processed'] ?? 0,
                         $currentProgress['total'] ?? 0,
-                        'Job ended unexpectedly without completion.',
+                        ImportFailure::INTERRUPTED,
                     );
+                }
+
+                // A failed parse keeps its file for the same reason a cancelled one
+                // does: it is the user's only way back. Deleting it here is what used
+                // to force a full re-upload — the file the user picked was already
+                // gone by the time they finished reading the error.
+                $finalStatus = Cache::get($this->progressKey())['status'] ?? '';
+
+                if ($finalStatus !== 'failed') {
+                    try {
+                        if (Storage::disk('local')->exists($this->tempFilePath)) {
+                            Storage::disk('local')->delete($this->tempFilePath);
+                        }
+                    } catch (\Throwable $cleanupErr) {
+                        Log::warning('Failed to cleanup temp file: ' . $cleanupErr->getMessage());
+                    }
                 }
             }
         }
@@ -181,7 +224,7 @@ class ProcessImportJob implements ShouldQueue
         }
 
         if (!Storage::disk('local')->exists($this->tempFilePath)) {
-            throw new \RuntimeException('Temporary import file not found: ' . $this->tempFilePath);
+            throw ImportFailure::fileMissing('Temporary import file not found: ' . $this->tempFilePath);
         }
         $fullPath  = Storage::disk('local')->path($this->tempFilePath);
         $extension = strtolower(pathinfo($fullPath, PATHINFO_EXTENSION));
@@ -196,11 +239,18 @@ class ProcessImportJob implements ShouldQueue
             : $user->property_id;
 
         if (!$propertyId) {
-            throw new \RuntimeException('Cannot resolve property_id for user ' . $this->userId . '. Import aborted.');
+            throw ImportFailure::noProperty('Cannot resolve property_id for user ' . $this->userId . '. Import aborted.');
         }
 
         $expectedHeader = $importState['true_header'] ?? [];
         $mapping        = $this->mappingPayload['mapping'] ?? [];
+
+        // Set only when the user overrode header auto-detection on the mapping page.
+        // It travels through import_state rather than the constructor deliberately:
+        // adding a constructor argument would break every job already serialised in
+        // the `jobs` table and force a queue drain on deploy, as v0.14.5 did.
+        $headerRowIndex = $importState['header_row_index'] ?? null;
+        $headerRowIndex = is_numeric($headerRowIndex) ? (int) $headerRowIndex : null;
 
         $options = $extension === 'csv' ? new \OpenSpout\Reader\CSV\Options() : new \OpenSpout\Reader\XLSX\Options();
         $reader  = $extension === 'csv' ? new \OpenSpout\Reader\CSV\Reader($options) : new \OpenSpout\Reader\XLSX\Reader($options);
@@ -222,7 +272,7 @@ class ProcessImportJob implements ShouldQueue
 
         // Pre-count data rows with a lightweight pass (no mapping, no DB writes)
         // so the progress bar can show a meaningful percentage.
-        $totalRows = $this->countDataRows($fullPath, $extension, $targetSheet, $expectedHeader);
+        $totalRows = $this->countDataRows($fullPath, $extension, $targetSheet, $expectedHeader, $headerRowIndex);
 
         $this->setProgress('processing', 0, $totalRows);
 
@@ -232,13 +282,28 @@ class ProcessImportJob implements ShouldQueue
                 continue;
             }
 
+            $rowNumber = 0;
+
             foreach ($sheet->getRowIterator() as $row) {
                 $cells = array_map(function ($val) {
                     if ($val instanceof \DateTimeInterface) return $val->format('Y-m-d');
                     return is_string($val) ? trim($val) : (string) $val;
                 }, $row->toArray());
 
+                $currentRow = $rowNumber++;
+
                 if ($header === null) {
+                    // An explicit choice wins outright. Content matching cannot be
+                    // used as a fallback here: on a file with a repeated or
+                    // near-duplicate row it would latch onto an earlier row than the
+                    // one the user picked and silently shift the whole data offset.
+                    if ($headerRowIndex !== null) {
+                        if ($currentRow === $headerRowIndex) {
+                            $header = $cells;
+                        }
+                        continue;
+                    }
+
                     if (!empty($expectedHeader) && count(array_intersect($cells, $expectedHeader)) >= 2) {
                         $header = $cells;
                         continue;
@@ -324,6 +389,15 @@ class ProcessImportJob implements ShouldQueue
 
         $reader->close();
 
+        // No header was ever recognised, so nothing after it could be read as data.
+        // This used to "succeed" with zero rows and drop the user on an empty review
+        // page with no explanation — a silent failure is still a failure.
+        if ($header === null) {
+            throw ImportFailure::noHeader(
+                'No header row matched the expected header in ' . $this->tempFilePath
+            );
+        }
+
         // Re-check before the final flush. For any file smaller than one chunk the
         // loop above never reaches a boundary, so this is the only cancellation
         // checkpoint such an import gets — previously it had none, and cancelling
@@ -352,8 +426,13 @@ class ProcessImportJob implements ShouldQueue
      * This is a lightweight pass (no regex, no transformation) used only to establish
      * the total for the progress bar.
      */
-    private function countDataRows(string $fullPath, string $extension, int $targetSheet, array $expectedHeader): int
-    {
+    private function countDataRows(
+        string $fullPath,
+        string $extension,
+        int $targetSheet,
+        array $expectedHeader,
+        ?int $headerRowIndex = null,
+    ): int {
         $options = $extension === 'csv'
             ? new \OpenSpout\Reader\CSV\Options()
             : new \OpenSpout\Reader\XLSX\Options();
@@ -373,10 +452,23 @@ class ProcessImportJob implements ShouldQueue
                 continue;
             }
 
+            $rowNumber = 0;
+
             foreach ($sheet->getRowIterator() as $row) {
                 $cells = array_map(fn($v) => is_string($v) ? trim($v) : (string) $v, $row->toArray());
 
+                $currentRow = $rowNumber++;
+
                 if (!$headerFound) {
+                    // Must mirror processFile()'s rule exactly, or the progress bar
+                    // counts against a different data offset than the one imported.
+                    if ($headerRowIndex !== null) {
+                        if ($currentRow === $headerRowIndex) {
+                            $headerFound = true;
+                        }
+                        continue;
+                    }
+
                     $nonEmpty = count(array_filter($cells));
                     $overlap  = !empty($expectedHeader)
                         ? count(array_intersect($cells, $expectedHeader))

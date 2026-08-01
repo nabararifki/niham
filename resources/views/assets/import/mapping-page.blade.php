@@ -3,41 +3,76 @@
         <div class="flex flex-wrap justify-between items-center text-gray-900 dark:text-gray-100 gap-4"
              x-data="{
                 sheets: window.importPayload?.sheets || [],
-                selectedSheet: {{ request()->query('sheet', 0) }},
-                loadSheet() {
-                    window.location.href = window.location.pathname + '?sheet=' + encodeURIComponent(this.selectedSheet);
+                selectedSheet: {{ (int) request()->query('sheet', $current_sheet_index ?? 0) }},
+                headerRow: @js((string) ($header_row_choice ?? 'auto')),
+                headerRowLimit: {{ (int) ($header_row_limit ?? 15) }},
+                get hasMultipleSheets() { return this.sheets.length > 1; },
+                /* One navigation applies both selections; the controller re-peeks
+                   whichever of them actually changed. */
+                reloadWithSelection() {
+                    const params = new URLSearchParams();
+                    if (this.hasMultipleSheets) params.set('sheet', this.selectedSheet);
+                    params.set('header_row', this.headerRow);
+                    window.location.href = window.location.pathname + '?' + params.toString();
                 }
              }">
             <h2 class="font-semibold text-xl leading-tight">
                 {{ __('assets.column_mapping') ?? 'Column Mapping' }}
             </h2>
 
-            <!-- Sheet Selector (in header, right-aligned) -->
-            <template x-if="sheets.length > 1">
-                <div class="flex items-center gap-2">
-                    <label for="sheetSelector" class="text-sm font-medium text-gray-600 dark:text-gray-300 whitespace-nowrap">
-                        {{ __('assets.select_sheet') ?? 'Select Excel Sheet' }}
-                    </label>
+            <!-- Sheet + Header Row selectors (in header, right-aligned) -->
+            <div class="flex items-center gap-2 flex-wrap">
+                {{-- The label names only the controls actually on screen: a
+                     single-sheet file has no sheet to choose, and saying otherwise
+                     sends the user hunting for a dropdown that isn't there. --}}
+                <label for="headerRowSelector" class="text-sm font-medium text-gray-600 dark:text-gray-300 whitespace-nowrap"
+                       x-text="hasMultipleSheets
+                            ? @js(__('assets.select_sheet_and_header'))
+                            : @js(__('assets.header_row'))"></label>
+
+                <template x-if="hasMultipleSheets">
                     <select id="sheetSelector"
                             x-model="selectedSheet"
+                            aria-label="{{ __('assets.select_sheet') }}"
                             class="select select-bordered select-sm bg-white dark:bg-gray-900 text-gray-800 dark:text-gray-100 border-gray-300 dark:border-gray-600 focus:ring-accent focus:border-accent rounded-lg text-sm min-w-[160px]">
                         <template x-for="(sheet, idx) in sheets" :key="idx">
                             <option :value="idx" x-text="sheet" :selected="idx == selectedSheet"></option>
                         </template>
                     </select>
-                    <button type="button"
-                            @click="loadSheet()"
-                            class="inline-flex items-center gap-1.5 px-3 py-1.5 bg-accent/10 hover:bg-accent/20 text-accent border border-accent/30 rounded-lg text-sm font-medium transition-all duration-200"
-                            title="{{ __('assets.load_sheet') ?? 'Load Sheet' }}">
-                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
-                        </svg>
-                        <span class="hidden sm:inline">{{ __('assets.load_sheet') ?? 'Load' }}</span>
-                    </button>
-                </div>
-            </template>
+                </template>
+
+                <select id="headerRowSelector"
+                        x-model="headerRow"
+                        aria-label="{{ __('assets.header_row') }}"
+                        title="{{ __('assets.header_row_help') }}"
+                        class="select select-bordered select-sm bg-white dark:bg-gray-900 text-gray-800 dark:text-gray-100 border-gray-300 dark:border-gray-600 focus:ring-accent focus:border-accent rounded-lg text-sm min-w-[120px]">
+                    <option value="auto">{{ __('assets.header_row_auto') }}</option>
+                    @for ($i = 1; $i <= ($header_row_limit ?? 15); $i++)
+                        <option value="{{ $i }}">{{ __('assets.header_row_option', ['number' => $i]) }}</option>
+                    @endfor
+                </select>
+
+                <button type="button"
+                        @click="reloadWithSelection()"
+                        class="inline-flex items-center gap-1.5 px-3 py-1.5 bg-accent/10 hover:bg-accent/20 text-accent border border-accent/30 rounded-lg text-sm font-medium transition-all duration-200"
+                        title="{{ __('assets.load_sheet') ?? 'Load Sheet' }}">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                    </svg>
+                    <span class="hidden sm:inline">{{ __('assets.load_sheet') ?? 'Load' }}</span>
+                </button>
+            </div>
         </div>
     </x-slot>
+
+    @if (!empty($header_row_warning))
+        <div class="max-w-7xl mx-auto sm:px-6 lg:px-8 pt-4">
+            <div class="p-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-xl text-sm text-amber-800 dark:text-amber-200 flex items-start gap-2">
+                <svg class="w-4 h-4 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
+                <span>{{ $header_row_warning }}</span>
+            </div>
+        </div>
+    @endif
 
     <!-- Safe Hydration Block -->
     <script>
@@ -366,6 +401,14 @@
                 </div>
             </template>
 
+            <!-- Possible solutions: what the user can actually do about it -->
+            <template x-if="status === 'failed' && errorHint">
+                <div class="mt-3 p-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-xl text-sm text-amber-800 dark:text-amber-200">
+                    <p class="font-semibold mb-1">{{ __('assets.possible_solutions') }}</p>
+                    <p class="leading-relaxed" x-text="errorHint"></p>
+                </div>
+            </template>
+
             <!-- Item 4: Bottom - Button -->
             <template x-if="status === 'processing' || status === 'pending'">
                 <button type="button" 
@@ -375,11 +418,24 @@
                 </button>
             </template>
 
-            <!-- Close on failure -->
+            <!-- Close / Retry on failure -->
+            <!--
+                The uploaded file is deliberately kept on failure (see the finally
+                block in ProcessImportJob), so Retry re-runs mapping → dispatch
+                against that same file. Neither button navigates: this modal is an
+                overlay on the mapping page, so Close simply returns the user to
+                their column mapping with everything still set.
+            -->
             <template x-if="status === 'failed'">
-                <div class="modal-action mt-4">
-                    <button @click="closeModal()" class="btn btn-sm btn-ghost border border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-xl w-full">
+                <div class="modal-action mt-4 flex gap-2">
+                    <button @click="closeModal()" class="btn btn-sm btn-ghost border border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-xl flex-1">
                         {{ __('assets.close') }}
+                    </button>
+                    <button @click="retryImport()" class="btn btn-sm bg-accent border-transparent text-white hover:opacity-90 rounded-xl flex-1">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                        </svg>
+                        {{ __('assets.retry_import') }}
                     </button>
                 </div>
             </template>
@@ -394,7 +450,10 @@
                 proposals: window.importPayload.proposals || {},
                 tempFilePath: window.importPayload.tempFilePath || '',
                 sheets: window.importPayload.sheets || [],
-                selectedSheet: {{ request()->query('sheet', 0) }},
+                // Falls back to the cached sheet, not 0: a header-row-only reload
+                // carries no ?sheet, and defaulting to 0 there would silently
+                // dispatch the import against the wrong sheet.
+                selectedSheet: {{ (int) request()->query('sheet', $current_sheet_index ?? 0) }},
                 isExecutive: !!window.importPayload.isExecutive,
                 userDepartmentName: window.importPayload.userDepartmentName || '',
                 
@@ -476,6 +535,13 @@
                     } catch (e) {
                         console.error("Initialization failed:", e);
                     }
+
+                    // Hand submit() to the progress modal so its Retry button can
+                    // re-dispatch the same mapping against the same uploaded file.
+                    // The two are sibling Alpine components with no shared scope;
+                    // this mirrors how window.__importStatusUrl already crosses
+                    // that boundary.
+                    window.__importRetry = () => this.submit();
                 },
 
                 dragStart(col) {
@@ -646,6 +712,7 @@
                 processed: 0,
                 total: 0,
                 errorMsg: '',
+                errorHint: '',
                 pollTimer: null,
                 pollingStarted: false,       // Guard against duplicate startPolling calls
                 pollTimeoutTimer: null,      // Safety timeout
@@ -697,6 +764,7 @@
                             self.processed = data.processed || 0;
                             self.total = data.total || 0;
                             self.errorMsg = data.error || '';
+                            self.errorHint = data.error_hint || '';
 
                             self.rowText = self.formatRowText(self.processed, self.total);
                             self.updateTitles();
@@ -734,7 +802,8 @@
                         if (self.pollingStarted && self.status !== 'completed' && self.status !== 'failed') {
                             self.stopPolling();
                             self.status = 'failed';
-                            self.errorMsg = 'Import timed out. Please check if the queue worker is running.';
+                            self.errorMsg = '{{ __("assets.import_timed_out") }}';
+                            self.errorHint = '{{ __("assets.import_timed_out_hint") }}';
                             self.title = '{{ __("assets.import_failed_title") }}';
                             self.subtitle = '';
                         }
@@ -777,6 +846,49 @@
                     this.stopPolling();
                     this.hideOverlay();
                     document.getElementById('progress_modal').close();
+                },
+
+                /**
+                 * Re-dispatch the same mapping against the same already-uploaded
+                 * file. The modal stays open and the page never navigates.
+                 *
+                 * Resetting the state here is not cosmetic: the MutationObserver in
+                 * init() only fires on the dialog's `open` attribute, which does not
+                 * change for a modal that is already open. So nothing else will
+                 * re-arm pollingStarted, and without this the new run's progress
+                 * would never be polled.
+                 */
+                retryImport() {
+                    if (typeof window.__importRetry !== 'function') {
+                        // columnMapping failed to initialise; a reload is the only
+                        // honest fallback, and the file is still on the server.
+                        window.location.reload();
+                        return;
+                    }
+
+                    this.stopPolling();
+                    this.status = 'pending';
+                    this.percentage = 0;
+                    this.processed = 0;
+                    this.total = 0;
+                    this.errorMsg = '';
+                    this.errorHint = '';
+                    this.title = '{{ __("assets.import_progress_title") }}';
+                    this.subtitle = '{{ __("assets.import_progress_subtitle") }}';
+                    this.rowText = '{{ __("assets.import_row_counting") }}';
+
+                    window.__importRetry();
+
+                    // submit() only opens the dialog, which is already open — so the
+                    // observer will not fire. Start polling directly once the new
+                    // dispatch has had a moment to seed its progress record.
+                    const self = this;
+                    setTimeout(() => {
+                        if (!self.pollingStarted && document.getElementById('progress_modal').open) {
+                            self.pollingStarted = true;
+                            self.startPolling();
+                        }
+                    }, 300);
                 },
 
                 cancelImport() {
