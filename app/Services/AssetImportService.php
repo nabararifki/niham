@@ -13,6 +13,8 @@ use OpenSpout\Reader\XLSX\Options as XlsxOptions;
 
 class AssetImportService
 {
+    use \App\Traits\SanitizesImportDates;
+
     /**
      * Bilingual keyword map: column header keywords → canonical field names.
      * Each entry uses regex with prefix/suffix tolerance.
@@ -59,10 +61,11 @@ class AssetImportService
             if ($currentSheetIndex === $sheetIndex && $rowCount === 0) {
                 foreach ($sheet->getRowIterator() as $row) {
                     /** @var Row $row */
-                    $cells = array_map(function ($val) {
-                        if ($val instanceof \DateTimeInterface) return $val->format('Y-m-d');
-                        return is_string($val) ? trim($val) : (string) $val;
-                    }, $row->toArray());
+                    // Shared with the import job, so the preview and the import
+                    // agree on what a cell says. This guarded DateTimeInterface but
+                    // not DateInterval, so a duration-formatted cell threw here and
+                    // took the mapping page down with it.
+                    $cells = array_map(fn ($val) => $this->coerceToString($val), $row->toArray());
 
                     $firstSheetRows[] = $cells;
                     $rowCount++;

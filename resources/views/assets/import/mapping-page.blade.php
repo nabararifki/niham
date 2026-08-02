@@ -411,6 +411,26 @@
                 </div>
             </template>
 
+            <!--
+                Technical detail, super-admins only. status() omits the field
+                entirely for everyone else, so this control does not render rather
+                than rendering empty — there is nothing here to discover by poking
+                at the DOM. The string itself is already stripped of absolute paths
+                and carries no stack trace; see describeFailure() in the job.
+            -->
+            <template x-if="status === 'failed' && errorDetail">
+                <div class="mt-3">
+                    <button type="button" @click="showErrorDetail = !showErrorDetail"
+                            class="text-xs font-medium text-gray-500 hover:text-accent dark:text-gray-400 dark:hover:text-accent transition-colors underline underline-offset-2"
+                            x-text="showErrorDetail ? '{{ __('assets.hide_error_details') }}' : '{{ __('assets.show_error_details') }}'"></button>
+                    <div x-show="showErrorDetail" x-cloak
+                         class="mt-2 p-3 bg-gray-100 dark:bg-gray-900/60 border border-gray-200 dark:border-gray-700 rounded-xl">
+                        <p class="text-[11px] font-semibold uppercase tracking-wider text-gray-400 mb-1">{{ __('assets.error_details_label') }}</p>
+                        <p class="font-mono text-xs break-words text-gray-700 dark:text-gray-300" x-text="errorDetail"></p>
+                    </div>
+                </div>
+            </template>
+
             <!-- Item 4: Bottom - Button -->
             <template x-if="status === 'processing' || status === 'pending'">
                 <button type="button" 
@@ -715,6 +735,9 @@
                 total: 0,
                 errorMsg: '',
                 errorHint: '',
+                // Populated only when status() decides the viewer may see it.
+                errorDetail: '',
+                showErrorDetail: false,
                 pollTimer: null,
                 pollingStarted: false,       // Guard against duplicate startPolling calls
                 pollTimeoutTimer: null,      // Safety timeout
@@ -767,6 +790,7 @@
                             self.total = data.total || 0;
                             self.errorMsg = data.error || '';
                             self.errorHint = data.error_hint || '';
+                            self.errorDetail = data.error_detail || '';
 
                             self.rowText = self.formatRowText(self.processed, self.total);
                             self.updateTitles();
@@ -875,6 +899,8 @@
                     this.total = 0;
                     this.errorMsg = '';
                     this.errorHint = '';
+                    this.errorDetail = '';
+                    this.showErrorDetail = false;
                     this.title = '{{ __("assets.import_progress_title") }}';
                     this.subtitle = '{{ __("assets.import_progress_subtitle") }}';
                     this.rowText = '{{ __("assets.import_row_counting") }}';

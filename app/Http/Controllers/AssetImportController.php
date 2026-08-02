@@ -415,7 +415,21 @@ class AssetImportController extends Controller
         // Normalise onto the full shape — writers have historically stored partial
         // records — and keep import_id internal; it is bookkeeping for the worker,
         // not something the progress modal needs.
-        $payload = array_merge($default, Arr::except($progress, ['import_id', 'error_code']));
+        $payload = array_merge($default, Arr::except($progress, ['import_id', 'error_code', 'error_detail']));
+
+        // Technical detail is released to super-admins only.
+        //
+        // That is where this app already draws the line for diagnostic and
+        // cross-tenant information — BackupController restricts backups the same
+        // way, and entity dropdowns only name the owning property for super-admins.
+        // It is also the useful split: the localized cause and its "possible
+        // solutions" hint are what a tenant user can act on, whereas a class name
+        // and message only help whoever escalates the problem. Keeping it out of
+        // the response entirely leaves describeFailure()'s sanitisation as a second
+        // line of defence rather than the only one.
+        if (($progress['error_detail'] ?? null) && auth()->user()?->isSuperAdmin()) {
+            $payload['error_detail'] = $progress['error_detail'];
+        }
 
         // ProcessImportJob runs in a queue worker with no session, so it cannot
         // resolve the importer's locale. It stores a translation key instead and
@@ -644,6 +658,82 @@ class AssetImportController extends Controller
     }
 
     /**
+     * Re-derive coercion notes across a bulk-edited selection.
+     *
+     * One value goes to every row, so it is judged once. Only the rows' *other*
+     * note differs, which caps the distinct outcomes at a handful regardless of how
+     * many rows were selected — so this reads once and writes one statement per
+     * distinct outcome, rather than reopening the per-row loop this page was
+     * refactored away from.
+     */
+    private function applyBulkCoercionNotes(array $rowIds, string $fieldName, mixed $newValue): void
+    {
+        if (!in_array($fieldName, ['purchase_date', 'purchase_cost'], true)) {
+            return;
+        }
+
+        $result = $fieldName === 'purchase_date'
+            ? $this->coerceToDate($newValue)
+            : $this->coerceToDecimal($newValue);
+
+        $existing = \DB::table('temporary_asset_imports')
+            ->whereIn('id', $rowIds)
+            ->pluck('_coercion_notes', 'id');
+
+        $groups = [];
+        foreach ($existing as $id => $raw) {
+            $notes = json_decode((string) $raw, true);
+            $notes = is_array($notes) ? $notes : [];
+
+            if ($result['error'] === null) {
+                unset($notes[$fieldName]);
+            } else {
+                $notes[$fieldName] = $result['error'];
+            }
+
+            $groups[empty($notes) ? '' : json_encode($notes)][] = $id;
+        }
+
+        foreach ($groups as $json => $ids) {
+            \DB::table('temporary_asset_imports')
+                ->whereIn('id', $ids)
+                ->update(['_coercion_notes' => $json === '' ? null : $json]);
+        }
+    }
+
+    /**
+     * Re-derive a staging row's coercion notes after one field was edited.
+     *
+     * Only the edited field is re-judged; the other fields' notes are carried
+     * forward untouched, since nothing about them changed. Returns the JSON to
+     * store, or null when the row has no remaining problems.
+     *
+     * Only purchase_date and purchase_cost can carry a note — every other editable
+     * column is a string target, and any value at all is a valid string.
+     */
+    private function recalculateCoercionNotes(object $stagingRow, string $fieldName, mixed $newValue): ?string
+    {
+        $notes = json_decode($stagingRow->_coercion_notes ?? '', true);
+        $notes = is_array($notes) ? $notes : [];
+
+        if (!in_array($fieldName, ['purchase_date', 'purchase_cost'], true)) {
+            return empty($notes) ? null : json_encode($notes);
+        }
+
+        $result = $fieldName === 'purchase_date'
+            ? $this->coerceToDate($newValue)
+            : $this->coerceToDecimal($newValue);
+
+        if ($result['error'] === null) {
+            unset($notes[$fieldName]);
+        } else {
+            $notes[$fieldName] = $result['error'];
+        }
+
+        return empty($notes) ? null : json_encode($notes);
+    }
+
+    /**
      * Create a Category or Department for a property, generating its code if none was given.
      *
      * The single place inside the import flow that writes one of these entities —
@@ -824,10 +914,21 @@ class AssetImportController extends Controller
 
         $pageOffset = ($currentPage - 1) * $perPage;
 
+        // rowId => [field => raw value that would not convert]. Decoded here rather
+        // than in Blade so the view never has to care that this is stored as JSON.
+        $coercionNotes = [];
+        foreach ($pageItems as $item) {
+            $decoded = json_decode($item['_coercion_notes'] ?? '', true);
+            if (is_array($decoded) && !empty($decoded)) {
+                $coercionNotes[$item['id']] = $decoded;
+            }
+        }
+
         return view('assets.import.review', compact(
             'paginatedData',
             'categories',
             'departments',
+            'coercionNotes',
             'categoriesMap',
             'departmentsMap',
             'warning',
@@ -972,8 +1073,13 @@ class AssetImportController extends Controller
             ->where('user_id', $userId)
             ->where('property_id', $propertyId)
             ->update([
-                $fieldName   => $updateValue,
-                'updated_at' => now(),
+                $fieldName        => $updateValue,
+                // The same coercion the import path applies, so a value typed here
+                // is judged by the same rule as one read from the file — and, more
+                // to the point, so a note clears when the user fixes the cell it
+                // was about instead of outliving the problem.
+                '_coercion_notes' => $this->recalculateCoercionNotes($stagingRow, $fieldName, $updateValue),
+                'updated_at'      => now(),
             ]);
 
         // Recalculate is_invalid for this row
@@ -1162,6 +1268,7 @@ class AssetImportController extends Controller
                 'updated_at' => now(),
             ]);
 
+        $this->applyBulkCoercionNotes($ownedIds, $fieldName, $updateValue);
         $this->recalculateInvalidFlags($ownedIds);
 
         // Hand back each row's new flag so the page can repaint the invalid

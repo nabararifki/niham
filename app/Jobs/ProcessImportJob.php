@@ -13,11 +13,12 @@ use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\DB;
 use App\Exceptions\ImportFailure;
 use App\Models\User;
+use App\Traits\CoercesImportValues;
 use App\Traits\SanitizesImportDates;
 
 class ProcessImportJob implements ShouldQueue
 {
-    use Dispatchable, InteractsWithQueue, Queueable, SerializesModels, SanitizesImportDates;
+    use CoercesImportValues, Dispatchable, InteractsWithQueue, Queueable, SanitizesImportDates, SerializesModels;
 
     /**
      * Number of seconds the job can run before timing out.
@@ -97,8 +98,13 @@ class ProcessImportJob implements ShouldQueue
      * it. The raw exception text stays in the log, where it is useful and where
      * leaking absolute server paths is harmless.
      */
-    private function setProgress(string $status, int $processed, int $total, ?string $errorCode = null): void
-    {
+    private function setProgress(
+        string $status,
+        int $processed,
+        int $total,
+        ?string $errorCode = null,
+        ?string $errorDetail = null
+    ): void {
         if (! $this->isCurrentAttempt()) {
             return;
         }
@@ -106,14 +112,44 @@ class ProcessImportJob implements ShouldQueue
         $percentage = $total > 0 ? min(100, (int) round(($processed / $total) * 100)) : 0;
 
         Cache::put($this->progressKey(), [
-            'status'     => $status,
-            'percentage' => $percentage,
-            'processed'  => $processed,
-            'total'      => $total,
-            'error'      => '',
-            'error_code' => $errorCode,
-            'import_id'  => $this->attemptId,
+            'status'       => $status,
+            'percentage'   => $percentage,
+            'processed'    => $processed,
+            'total'        => $total,
+            'error'        => '',
+            'error_code'   => $errorCode,
+            // Diagnostic, not user-facing copy. status() only releases it to a
+            // super-admin; see the note there.
+            'error_detail' => $errorDetail,
+            'import_id'    => $this->attemptId,
         ], self::CACHE_TTL);
+    }
+
+    /**
+     * A one-line technical description of a failure, safe to show a super-admin.
+     *
+     * The class name and message, nothing else. No stack trace, and every absolute
+     * path reduced to its basename — the earlier fix removed raw exception text
+     * from the UI precisely because it leaked the server's filesystem layout, and
+     * putting a "Show Details" button in front of the same string would undo that.
+     */
+    protected function describeFailure(\Throwable $e): string
+    {
+        $message = $e->getMessage();
+
+        // getMessage() usually holds no trace, but a wrapped exception can carry one
+        // inline. Cut at the first frame marker so a re-thrown error cannot smuggle
+        // a trace through a field that promises not to contain one.
+        $message = preg_split('/(Stack trace:|#\d+\s)/', $message)[0] ?? $message;
+
+        // Strip the application root first, then any remaining absolute path.
+        $message = str_replace(base_path(), '', $message);
+        $message = preg_replace('#(/[^\s:()"\']+)+/([^\s:()"\']+)#', '$2', $message) ?? $message;
+
+        $message = trim(preg_replace('/\s+/', ' ', $message) ?? '');
+        $message = mb_substr($message, 0, 300);
+
+        return class_basename($e) . ($message !== '' ? ': ' . $message : '');
     }
 
     /**
@@ -157,7 +193,7 @@ class ProcessImportJob implements ShouldQueue
                 'trace'   => $e->getTraceAsString(),
             ]);
 
-            $this->setProgress('failed', 0, 0, $this->classifyFailure($e));
+            $this->setProgress('failed', 0, 0, $this->classifyFailure($e), $this->describeFailure($e));
         } finally {
             // Only the current attempt is allowed to clean up.
             //
@@ -294,10 +330,10 @@ class ProcessImportJob implements ShouldQueue
             $rowNumber = 0;
 
             foreach ($sheet->getRowIterator() as $row) {
-                $cells = array_map(function ($val) {
-                    if ($val instanceof \DateTimeInterface) return $val->format('Y-m-d');
-                    return is_string($val) ? trim($val) : (string) $val;
-                }, $row->toArray());
+                // Every cell shape goes through the shared coercion, including the
+                // ones a bare (string) cast cannot survive — a duration cell used to
+                // throw here and take the whole import down with it.
+                $cells = array_map(fn ($val) => $this->coerceToString($val), $row->toArray());
 
                 $currentRow = $rowNumber++;
 
@@ -365,6 +401,25 @@ class ProcessImportJob implements ShouldQueue
                 $isEmpty   = empty($name) && empty($tag);
                 $isInvalid = $isEmpty ? false : (empty($name));
 
+                // Typed columns keep the raw text when it will not convert, and
+                // record why. The row still imports: is_invalid stays exactly what
+                // it has always meant (no name, no category), and storeBatch()
+                // already drops an unusable date or cost at save. What is new is
+                // that the drop is no longer silent — the review page can say which
+                // cell it was and what it contained.
+                $rawDate  = $getCombined('purchase_date');
+                $rawCost  = $getCombined('purchase_cost');
+                $dateCast = $this->coerceToDate($rawDate);
+                $costCast = $this->coerceToDecimal($rawCost);
+
+                $notes = [];
+                if ($dateCast['error'] !== null) {
+                    $notes['purchase_date'] = $dateCast['error'];
+                }
+                if ($costCast['error'] !== null) {
+                    $notes['purchase_cost'] = $costCast['error'];
+                }
+
                 $resultsChunk[] = [
                     'user_id'          => $this->userId,
                     'property_id'      => $propertyId,
@@ -375,11 +430,14 @@ class ProcessImportJob implements ShouldQueue
                     'status'           => $status,
                     'model'            => $getCombined('model'),
                     'serial_number'    => $getCombined('serial_number'),
-                    'purchase_date'    => $this->sanitizeDate($getCombined('purchase_date')),
-                    'purchase_cost'    => $getCombined('purchase_cost') ?: null,
+                    // On failure the raw text is kept, not blanked — the user cannot
+                    // correct a value they can no longer see.
+                    'purchase_date'    => $dateCast['value'] ?? $rawDate,
+                    'purchase_cost'    => $costCast['value'] ?? ($rawCost ?: null),
                     'remarks'          => $getCombined('remarks'),
                     '_category_hint'   => $getCombined('category'),
                     '_department_hint' => !$isExecutive ? '' : $getCombined('department'),
+                    '_coercion_notes'  => empty($notes) ? null : json_encode($notes),
                     'is_invalid'       => $isInvalid,
                     'created_at'       => $now,
                     'updated_at'       => $now,
@@ -470,7 +528,13 @@ class ProcessImportJob implements ShouldQueue
             $rowNumber = 0;
 
             foreach ($sheet->getRowIterator() as $row) {
-                $cells = array_map(fn($v) => is_string($v) ? trim($v) : (string) $v, $row->toArray());
+                // This pass only sizes the progress bar, but it runs BEFORE the
+                // import loop — so its cast is the first thing any cell meets. It
+                // used to be a bare (string), with none of processFile()'s guards,
+                // which meant one date-formatted cell anywhere in the sheet threw
+                // "Object of class DateTimeImmutable could not be converted to
+                // string" and ended the job with zero rows written.
+                $cells = array_map(fn ($v) => $this->coerceToString($v), $row->toArray());
 
                 $currentRow = $rowNumber++;
 

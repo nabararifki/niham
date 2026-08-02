@@ -350,6 +350,46 @@
                                                       aria-hidden="true">
                                                     <svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="3" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
                                                 </span>
+
+                                                {{-- A cell whose value could not be converted to its column's
+                                                     type. Amber, not the red invalid styling: these rows are
+                                                     valid and will import — it is only the offending value that
+                                                     gets dropped at save, and until now that happened silently.
+
+                                                     Teleported like the quick-add tooltip: the table sits in an
+                                                     overflow-x-auto wrapper, which computes overflow-y to auto
+                                                     as well and would clip an absolutely-positioned tooltip. --}}
+                                                @if (!empty($coercionNotes[$item['id']] ?? []))
+                                                    <span class="group relative inline-flex align-middle ml-1"
+                                                          x-data="{ tip: false, tx: 0, ty: 0 }"
+                                                          @click.stop
+                                                          @mouseenter="tip = true; tx = $event.clientX; ty = $event.clientY"
+                                                          @mousemove="tx = $event.clientX; ty = $event.clientY"
+                                                          @mouseleave="tip = false">
+                                                        <span tabindex="0"
+                                                              data-coercion-warning="{{ $item['id'] }}"
+                                                              @focus="tip = true; tx = $el.getBoundingClientRect().left; ty = $el.getBoundingClientRect().bottom"
+                                                              @blur="tip = false"
+                                                              aria-label="{{ __('assets.coercion_row_warning') }}"
+                                                              class="text-amber-500 group-hover:text-amber-600 focus:text-amber-600 transition-colors focus:outline-none">
+                                                            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                                                      d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
+                                                            </svg>
+                                                        </span>
+                                                        <template x-teleport="body">
+                                                            <div role="tooltip" x-show="tip" x-cloak
+                                                                 x-transition.opacity.duration.150ms
+                                                                 class="fixed z-[300] w-72 max-w-[calc(100vw-2rem)] rounded-lg bg-gray-900 dark:bg-gray-700 px-3 py-2 text-xs font-normal normal-case text-left leading-relaxed text-white shadow-2xl ring-1 ring-black/10 pointer-events-none"
+                                                                 :style="`top: ${ty + 18}px; left: ${Math.min(tx + 12, window.innerWidth - 304)}px;`">
+                                                                <p class="font-semibold mb-1">{{ __('assets.coercion_row_warning') }}</p>
+                                                                @foreach ($coercionNotes[$item['id']] as $field => $rawValue)
+                                                                    <p>{{ __('assets.coercion_note_' . ($field === 'purchase_date' ? 'date' : 'cost'), ['value' => $rawValue]) }}</p>
+                                                                @endforeach
+                                                            </div>
+                                                        </template>
+                                                    </span>
+                                                @endif
                                             </td>
 
                                             {{-- Tag --}}

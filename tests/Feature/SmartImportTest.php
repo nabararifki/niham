@@ -2760,11 +2760,41 @@ class SmartImportTest extends TestCase
         $writer = new \OpenSpout\Writer\XLSX\Writer($options);
         $writer->openToFile($absolute);
         foreach ($rows as $row) {
-            $writer->addRow(\OpenSpout\Common\Entity\Row::fromValues($row));
+            // A row given as Cell objects is written as-is, so a caller can attach a
+            // number format. That matters more than it sounds: OpenSpout only reads
+            // a date back as DateTimeImmutable when the cell carries a date format —
+            // a bare DateTimeImmutable round-trips as its Excel serial instead.
+            $writer->addRow(
+                $row instanceof \OpenSpout\Common\Entity\Row
+                    ? $row
+                    : \OpenSpout\Common\Entity\Row::fromValues($row)
+            );
         }
         $writer->close();
 
         return $relative;
+    }
+
+    /**
+     * A cell that reads back as a real DateTimeImmutable rather than a serial.
+     */
+    private function dateCell(string $date): \OpenSpout\Common\Entity\Cell
+    {
+        return \OpenSpout\Common\Entity\Cell::fromValue(
+            new \DateTimeImmutable($date),
+            (new \OpenSpout\Common\Entity\Style\Style())->withFormat('yyyy-mm-dd')
+        );
+    }
+
+    /**
+     * A duration cell, which reads back as DateInterval.
+     */
+    private function durationCell(string $spec): \OpenSpout\Common\Entity\Cell
+    {
+        return \OpenSpout\Common\Entity\Cell::fromValue(
+            new \DateInterval($spec),
+            (new \OpenSpout\Common\Entity\Style\Style())->withFormat('[h]:mm:ss')
+        );
     }
 
     private function seedCsvFile(string $hexId, string $body): string
@@ -3167,6 +3197,430 @@ class SmartImportTest extends TestCase
         $this->assertSame('Tag', $result['mapping_proposals']['tag']);
         $this->assertSame('Category', $result['mapping_proposals']['category']);
         $this->assertSame([0 => 'Tag', 1 => 'Name', 2 => 'Category', 3 => 'Status'], $result['header_columns']);
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // 14. TYPE COERCION (cell type vs target column type)
+    // ══════════════════════════════════════════════════════════════
+
+    /**
+     * Run a mapping against a file and return the staging rows it produced.
+     */
+    private function importFile(string $path, array $mapping): \Illuminate\Support\Collection
+    {
+        Cache::put('import_state_'.$this->userA->id, array_merge(
+            $this->peekFile($path),
+            ['temp_file_path' => $path, 'current_sheet_index' => 0, 'header_row_index' => null, 'header_row_choice' => 'auto']
+        ), 1800);
+
+        $this->postJson(route('assets.import.process-mapping'), [
+            'payload' => json_encode([
+                'temp_file_path' => $path,
+                'selected_sheet' => 0,
+                'mapping'        => $mapping,
+            ]),
+        ])->assertStatus(200);
+
+        return \DB::table('temporary_asset_imports')
+            ->where('user_id', $this->userA->id)->orderBy('id')->get();
+    }
+
+    /**
+     * The reported crash. countDataRows() cast every cell with a bare (string) and
+     * runs BEFORE the import loop, so one date-formatted cell anywhere in the sheet
+     * threw "Object of class DateTimeImmutable could not be converted to string"
+     * and ended the job with zero rows written — the whole file lost, not one cell.
+     *
+     * Note it does not need to be mapped to a string column to do that; mapping it
+     * to Tag is simply the shape that was reported.
+     */
+    public function test_a_date_cell_in_a_string_column_no_longer_kills_the_import(): void
+    {
+        $this->actingAs($this->userA);
+
+        $path = $this->seedXlsx('ca0100', [
+            ['Tag', 'Name'],
+            new \OpenSpout\Common\Entity\Row([$this->dateCell('2024-03-15'), \OpenSpout\Common\Entity\Cell::fromValue('Desk Chair')]),
+            ['A-2', 'Big Table'],
+            ['A-3', 'Lamp'],
+        ]);
+
+        $rows = $this->importFile($path, [
+            'tag'  => ['columns' => ['Tag'], 'separator' => ' '],
+            'name' => ['columns' => ['Name'], 'separator' => ' '],
+        ]);
+
+        // The whole file survived, not just the rows after the offending one.
+        $this->assertCount(3, $rows);
+        $this->assertSame(['Desk Chair', 'Big Table', 'Lamp'], $rows->pluck('name')->all());
+
+        // And the date became a sensible string rather than a crash or a serial.
+        $this->assertSame('2024-03-15', $rows->first()->tag);
+
+        $this->assertSame('completed', Cache::get('import_progress_'.$this->userA->id)['status']);
+    }
+
+    /**
+     * The other object type OpenSpout can return. It got past countDataRows()'s
+     * cast only to die in processFile(), which guarded DateTimeInterface but not
+     * this.
+     */
+    public function test_a_duration_cell_no_longer_kills_the_import(): void
+    {
+        $this->actingAs($this->userA);
+
+        $path = $this->seedXlsx('ca0101', [
+            ['Tag', 'Name'],
+            new \OpenSpout\Common\Entity\Row([$this->durationCell('PT3H30M'), \OpenSpout\Common\Entity\Cell::fromValue('Desk Chair')]),
+            ['A-2', 'Big Table'],
+        ]);
+
+        $rows = $this->importFile($path, [
+            'tag'  => ['columns' => ['Tag'], 'separator' => ' '],
+            'name' => ['columns' => ['Name'], 'separator' => ' '],
+        ]);
+
+        $this->assertCount(2, $rows);
+        $this->assertSame('03:30:00', $rows->first()->tag);
+        $this->assertSame('completed', Cache::get('import_progress_'.$this->userA->id)['status']);
+    }
+
+    /**
+     * A date cell with NO date number format reads back as its raw Excel serial.
+     * That never threw, which is why it went unnoticed — it just turned dates into
+     * meaningless integers.
+     */
+    public function test_a_bare_excel_serial_in_a_date_column_becomes_a_real_date(): void
+    {
+        $this->actingAs($this->userA);
+
+        $path = $this->seedXlsx('ca0102', [
+            ['Tag', 'Name', 'Purchase Date'],
+            // Written unformatted on purpose: this is exactly how the reader hands
+            // back a date column whose formatting was stripped.
+            ['A-1', 'Desk Chair', new \DateTimeImmutable('2024-03-15')],
+        ]);
+
+        $rows = $this->importFile($path, [
+            'tag'           => ['columns' => ['Tag'], 'separator' => ' '],
+            'name'          => ['columns' => ['Name'], 'separator' => ' '],
+            'purchase_date' => ['columns' => ['Purchase Date'], 'separator' => ' '],
+        ]);
+
+        $this->assertSame('2024-03-15', $rows->first()->purchase_date);
+    }
+
+    // ── The coercion rules themselves ────────────────────────────────
+
+    public static function dateShapes(): array
+    {
+        return [
+            'date object'      => [new \DateTimeImmutable('2024-03-15'), '2024-03-15'],
+            'iso string'       => ['2024-03-15', '2024-03-15'],
+            'day first'        => ['15/03/2024', '2024-03-15'],
+            'dotted'           => ['15.03.2024', '2024-03-15'],
+            'excel serial int' => [45366, '2024-03-15'],
+            'excel serial str' => ['45366', '2024-03-15'],
+            'placeholder'      => ['N/A', null],
+            'dash'             => ['-', null],
+            'empty'            => ['', null],
+            'null'             => [null, null],
+            'nonsense'         => ['ABC123', null],
+            // A bare year must stay a year, not be read as a serial.
+            'year'             => ['2024', '2024-01-01'],
+            // Above Excel's own ceiling, so not a date.
+            'out of range'     => [99999999, null],
+        ];
+    }
+
+    /**
+     * @dataProvider dateShapes
+     */
+    public function test_every_date_shape_goes_through_one_parser(mixed $input, ?string $expected): void
+    {
+        $service = new class
+        {
+            use \App\Traits\SanitizesImportDates;
+
+            public function call(mixed $v): ?string
+            {
+                return $this->sanitizeDate($v);
+            }
+        };
+
+        $this->assertSame($expected, $service->call($input));
+    }
+
+    public static function costShapes(): array
+    {
+        return [
+            'plain int'          => [1500, '1500', false],
+            'plain float'        => [1500.75, '1500.75', false],
+            'plain string'       => ['1500', '1500', false],
+            'rupiah'             => ['Rp 1.250.000', '1250000', false],
+            'idr prefix'         => ['IDR 1.250.000', '1250000', false],
+            'english separators' => ['1,250,000.50', '1250000.50', false],
+            'indonesian'         => ['1.250.000,50', '1250000.50', false],
+            'negative'           => ['-1500.25', '-1500.25', false],
+            'empty'              => ['', null, false],
+            'null'               => [null, null, false],
+            'unparseable'        => ['abc', null, true],
+            'symbols only'       => ['???', null, true],
+        ];
+    }
+
+    /**
+     * @dataProvider costShapes
+     */
+    public function test_cost_coercion_handles_real_world_shapes(mixed $input, ?string $expected, bool $expectError): void
+    {
+        $service = new class
+        {
+            use \App\Traits\CoercesImportValues;
+            use \App\Traits\SanitizesImportDates;
+
+            public function call(mixed $v): array
+            {
+                return $this->coerceToDecimal($v);
+            }
+        };
+
+        $result = $service->call($input);
+
+        $this->assertSame($expected, $result['value']);
+        $this->assertSame($expectError, $result['error'] !== null);
+    }
+
+    // ── Per-row visibility ───────────────────────────────────────────
+
+    /**
+     * An unusable value is kept, flagged, and still imported. It must NOT change
+     * is_invalid — that means "missing name or category" and nothing else, and
+     * turning one messy column into a page of blocked rows would be worse than the
+     * silent drop this replaces.
+     */
+    public function test_an_unreadable_value_is_recorded_without_invalidating_the_row(): void
+    {
+        $this->actingAs($this->userA);
+
+        $path = $this->seedCsvFile('ca0103', "Tag,Name,Purchase Date,Purchase Cost\nA-1,Desk Chair,ABC123,abc\nA-2,Big Table,2024-03-15,1500\n");
+
+        $rows = $this->importFile($path, [
+            'tag'           => ['columns' => ['Tag'], 'separator' => ' '],
+            'name'          => ['columns' => ['Name'], 'separator' => ' '],
+            'purchase_date' => ['columns' => ['Purchase Date'], 'separator' => ' '],
+            'purchase_cost' => ['columns' => ['Purchase Cost'], 'separator' => ' '],
+        ]);
+
+        $bad  = $rows->firstWhere('tag', 'A-1');
+        $good = $rows->firstWhere('tag', 'A-2');
+
+        // Raw text kept — the user cannot fix a value they can no longer see.
+        $this->assertSame('ABC123', $bad->purchase_date);
+        $this->assertSame('abc', $bad->purchase_cost);
+
+        $this->assertSame(
+            ['purchase_date' => 'ABC123', 'purchase_cost' => 'abc'],
+            json_decode($bad->_coercion_notes, true)
+        );
+
+        // Still importable, exactly as before this change.
+        $this->assertFalse((bool) $bad->is_invalid);
+
+        // The clean row is untouched and carries no note.
+        $this->assertNull($good->_coercion_notes);
+        $this->assertSame('2024-03-15', $good->purchase_date);
+        $this->assertSame('1500', $good->purchase_cost);
+    }
+
+    public function test_the_review_page_names_the_column_and_the_value_that_failed(): void
+    {
+        $this->actingAs($this->userA);
+
+        $id = \DB::table('temporary_asset_imports')->insertGetId([
+            'user_id' => $this->userA->id, 'property_id' => $this->propertyA->id,
+            'tag' => 'A-1', 'name' => 'Desk Chair', 'category_id' => $this->categoryA->id,
+            'status' => 'in_service', 'is_invalid' => false,
+            'purchase_date' => 'ABC123',
+            '_coercion_notes' => json_encode(['purchase_date' => 'ABC123']),
+            'created_at' => now(), 'updated_at' => now(),
+        ]);
+
+        $this->get(route('assets.import-review'))
+            ->assertStatus(200)
+            ->assertSee('data-coercion-warning="'.$id.'"', false)
+            // Escaped comparison: the copy contains an apostrophe, which Blade emits
+            // as &#039;, and assertSee escapes the expectation the same way.
+            ->assertSee(__('assets.coercion_note_date', ['value' => 'ABC123']))
+            // Amber, not the red invalid treatment — the row is valid.
+            ->assertSee('text-amber-500', false)
+            // The pattern established elsewhere in this feature.
+            ->assertDontSee('cursor-help', false);
+    }
+
+    public function test_fixing_the_cell_clears_its_note(): void
+    {
+        $this->actingAs($this->userA);
+
+        $id = \DB::table('temporary_asset_imports')->insertGetId([
+            'user_id' => $this->userA->id, 'property_id' => $this->propertyA->id,
+            'tag' => 'A-1', 'name' => 'Desk Chair', 'category_id' => $this->categoryA->id,
+            'status' => 'in_service', 'is_invalid' => false,
+            'purchase_date' => 'ABC123', 'purchase_cost' => 'abc',
+            '_coercion_notes' => json_encode(['purchase_date' => 'ABC123', 'purchase_cost' => 'abc']),
+            'created_at' => now(), 'updated_at' => now(),
+        ]);
+
+        $this->postJson(route('assets.import.update-row'), [
+            'row_id' => $id, 'field_name' => 'purchase_date', 'new_value' => '2024-03-15',
+        ])->assertStatus(200);
+
+        // Only the fixed field's note goes; the other one is untouched.
+        $this->assertSame(
+            ['purchase_cost' => 'abc'],
+            json_decode(\DB::table('temporary_asset_imports')->find($id)->_coercion_notes, true)
+        );
+
+        $this->postJson(route('assets.import.update-row'), [
+            'row_id' => $id, 'field_name' => 'purchase_cost', 'new_value' => 'Rp 2.000.000',
+        ])->assertStatus(200);
+
+        $this->assertNull(\DB::table('temporary_asset_imports')->find($id)->_coercion_notes);
+    }
+
+    public function test_a_bad_value_typed_on_the_review_page_is_recorded_too(): void
+    {
+        $this->actingAs($this->userA);
+
+        $id = \DB::table('temporary_asset_imports')->insertGetId([
+            'user_id' => $this->userA->id, 'property_id' => $this->propertyA->id,
+            'tag' => 'A-1', 'name' => 'Desk Chair', 'category_id' => $this->categoryA->id,
+            'status' => 'in_service', 'is_invalid' => false,
+            'created_at' => now(), 'updated_at' => now(),
+        ]);
+
+        // Staging columns are strings, so this never errored — it was accepted and
+        // then silently dropped by storeBatch() at save time.
+        $this->postJson(route('assets.import.update-row'), [
+            'row_id' => $id, 'field_name' => 'purchase_cost', 'new_value' => 'not a number',
+        ])->assertStatus(200)->assertJson(['is_invalid' => false]);
+
+        $row = \DB::table('temporary_asset_imports')->find($id);
+        $this->assertSame(['purchase_cost' => 'not a number'], json_decode($row->_coercion_notes, true));
+        $this->assertSame('not a number', $row->purchase_cost);
+    }
+
+    public function test_bulk_edit_applies_the_same_coercion_rules(): void
+    {
+        $this->actingAs($this->userA);
+        $ids = array_values($this->seedThreeStagingRows());
+
+        $this->postJson(route('assets.import.bulk-update-rows'), [
+            'row_ids' => $ids, 'field_name' => 'purchase_cost', 'new_value' => 'nope',
+        ])->assertStatus(200);
+
+        foreach ($ids as $id) {
+            $this->assertSame(
+                ['purchase_cost' => 'nope'],
+                json_decode(\DB::table('temporary_asset_imports')->find($id)->_coercion_notes, true)
+            );
+        }
+
+        $this->postJson(route('assets.import.bulk-update-rows'), [
+            'row_ids' => $ids, 'field_name' => 'purchase_cost', 'new_value' => '1.250.000',
+        ])->assertStatus(200);
+
+        foreach ($ids as $id) {
+            $this->assertNull(\DB::table('temporary_asset_imports')->find($id)->_coercion_notes);
+        }
+    }
+
+    // ── Job-level detail ─────────────────────────────────────────────
+
+    private function seedFailedImport(string $detail): void
+    {
+        Cache::put('import_progress_'.$this->userA->id, [
+            'status' => 'failed', 'percentage' => 0, 'processed' => 0, 'total' => 0,
+            'error' => '', 'error_code' => \App\Exceptions\ImportFailure::GENERIC,
+            'error_detail' => $detail, 'import_id' => 'abc123',
+        ], 600);
+    }
+
+    public function test_job_error_detail_is_withheld_from_ordinary_users(): void
+    {
+        $this->actingAs($this->userA);
+        $this->seedFailedImport('TypeError: Object of class DateTimeImmutable could not be converted to string');
+
+        $payload = $this->get(route('assets.import-status'))->assertStatus(200)->json();
+
+        // Absent, not blank — there is nothing to find by inspecting the response.
+        $this->assertArrayNotHasKey('error_detail', $payload);
+        // The actionable half is still there.
+        $this->assertSame(__('assets.import_error_generic'), $payload['error']);
+    }
+
+    public function test_job_error_detail_is_released_to_a_super_admin(): void
+    {
+        $superAdmin = User::factory()->create([
+            'is_super_admin' => true, 'property_id' => null, 'department_id' => null,
+        ]);
+
+        Cache::put('import_progress_'.$superAdmin->id, [
+            'status' => 'failed', 'percentage' => 0, 'processed' => 0, 'total' => 0,
+            'error' => '', 'error_code' => \App\Exceptions\ImportFailure::GENERIC,
+            'error_detail' => 'TypeError: could not be converted to string',
+            'import_id' => 'abc123',
+        ], 600);
+
+        $this->actingAs($superAdmin)
+            ->get(route('assets.import-status'))
+            ->assertStatus(200)
+            ->assertJsonPath('error_detail', 'TypeError: could not be converted to string');
+    }
+
+    /**
+     * The earlier parse-failure fix removed raw exception text from the UI because
+     * it leaked absolute server paths. Putting a "Show Details" button in front of
+     * the same string would undo that, so the sanitiser is pinned here.
+     */
+    public function test_the_failure_detail_carries_no_paths_or_stack_trace(): void
+    {
+        $job = new ProcessImportJobDescribeProbe(1, 'temp/import_x.csv', [], 0, 'a');
+
+        $detail = $job->describe(new \RuntimeException(
+            'Could not open '.base_path('storage/app/private/temp/import_abc.xlsx')." for reading\n#0 /var/www/vendor/foo.php(12)"
+        ));
+
+        $this->assertStringStartsWith('RuntimeException:', $detail);
+        $this->assertStringNotContainsString(base_path(), $detail);
+        $this->assertStringNotContainsString('/', $detail);
+        $this->assertStringNotContainsString('#0', $detail);
+        $this->assertStringContainsString('import_abc.xlsx', $detail, 'The filename is the useful part; only the path is not.');
+    }
+
+    public function test_coercion_copy_follows_the_active_locale(): void
+    {
+        foreach (['coercion_row_warning', 'coercion_note_date', 'coercion_note_cost', 'show_error_details'] as $key) {
+            app()->setLocale('en');
+            $en = __('assets.'.$key, ['value' => 'x']);
+            app()->setLocale('id');
+            $this->assertNotEquals($en, __('assets.'.$key, ['value' => 'x']),
+                "Key [{$key}] is not actually translated.");
+        }
+    }
+}
+
+/**
+ * describeFailure() is not part of the job's public surface, but its output is a
+ * security boundary — the one thing standing between a super-admin's "Show Details"
+ * and the server's filesystem layout. That earns a direct test rather than being
+ * exercised only through a real failure, so the method is protected and reached here.
+ */
+class ProcessImportJobDescribeProbe extends \App\Jobs\ProcessImportJob
+{
+    public function describe(\Throwable $e): string
+    {
+        return $this->describeFailure($e);
     }
 }
 

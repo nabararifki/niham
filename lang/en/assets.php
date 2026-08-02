@@ -161,6 +161,13 @@ return [
     'quick_add_department'              => 'Add a new department',
     'quick_add_code_hint'               => 'Leave blank to generate one automatically.',
     'quick_add_error'                   => 'Failed to create: :message',
+    // Type-coercion notices
+    'coercion_row_warning'              => 'Some values in this row could not be read',
+    'coercion_note_date'                => 'Purchase Date: couldn\'t read ":value" as a date. It will be left empty when saved.',
+    'coercion_note_cost'                => 'Purchase Cost: couldn\'t read ":value" as a number. It will be left empty when saved.',
+    'show_error_details'                => 'Show Details',
+    'hide_error_details'                => 'Hide Details',
+    'error_details_label'               => 'Technical detail',
 ];
 
 
