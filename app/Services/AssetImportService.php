@@ -88,37 +88,64 @@ class AssetImportService
             }
             $trueHeaderIndex = $headerRowIndex;
         } else {
+            // Scored on the span a row covers — last filled column minus first, not
+            // the count of filled cells.
+            //
+            // Counting filled cells loses the header row of exactly the files this
+            // change is about. A header merged across three columns, or one with a
+            // blank column in it, has FEWER filled cells than the data underneath it,
+            // so the first data row won and the real column names never appeared on
+            // the mapping page at all. Span is unmoved by those gaps while still
+            // preferring the widest row, so the title-banner case it was written for
+            // behaves as before. Ties go to the earliest row, as they always did.
             $trueHeaderIndex = 0;
-            $maxCells = -1;
+            $widestSpan = -1;
 
             foreach ($firstSheetRows as $idx => $row) {
-                $nonEmptyCount = count(array_filter($row, fn($cell) => trim($cell) !== ''));
-                if ($nonEmptyCount > $maxCells) {
-                    $maxCells = $nonEmptyCount;
+                $filled = [];
+                foreach ($row as $col => $cell) {
+                    if (trim((string) $cell) !== '') {
+                        $filled[] = $col;
+                    }
+                }
+
+                $span = empty($filled) ? 0 : (max($filled) - min($filled) + 1);
+
+                if ($span > $widestSpan) {
+                    $widestSpan = $span;
                     $trueHeaderIndex = $idx;
                 }
             }
         }
 
-        // Sanitize headers to remove nulls, empty strings, and whitespace-only column headers
-        $trueHeader = array_values(array_filter(
-            array_map('trim', $firstSheetRows[$trueHeaderIndex] ?? []),
-            fn($cell) => $cell !== '' && !is_null($cell)
-        ));
+        $rawHeaderRow = $firstSheetRows[$trueHeaderIndex] ?? [];
+        $rawPreview   = array_slice($firstSheetRows, $trueHeaderIndex + 1, 10);
 
-        if (empty($trueHeader)) {
+        // Merge ranges are only worth the lookup when the header actually has an
+        // interior gap — see readMergeRanges() for why this is not unconditional.
+        $mergeRanges = ($extension !== 'csv' && $this->headerHasInteriorGap($rawHeaderRow))
+            ? $this->readMergeRanges($filePath, $sheetIndex)
+            : [];
+
+        // Column identity is the original spreadsheet position, kept as the array
+        // key throughout. Everything downstream reads cells at that key, so a blank
+        // or merged column can no longer shift what sits after it.
+        $headerColumns = $this->resolveHeaderColumns($rawHeaderRow, $rawPreview, $mergeRanges);
+
+        if (empty($headerColumns)) {
             throw new Exception('No valid headers detected or file is empty.');
         }
+
+        $trueHeader = array_values($headerColumns);
 
         // 2. Ekstrak Preview Data (10 baris setelah True Header)
         // Konversi dari indexed array ke associative array ber-key nama kolom
         // agar Alpine getCombinedValue(row, fieldId) bisa melakukan row[colName].
-        $rawPreview = array_slice($firstSheetRows, $trueHeaderIndex + 1, 10);
         $previewData = [];
         foreach ($rawPreview as $row) {
             $assocRow = [];
-            foreach ($trueHeader as $colIdx => $colName) {
-                $assocRow[$colName] = $row[$colIdx] ?? '';
+            foreach ($headerColumns as $originalIndex => $colName) {
+                $assocRow[$colName] = $row[$originalIndex] ?? '';
             }
             $previewData[] = $assocRow;
         }
@@ -152,7 +179,252 @@ class AssetImportService
             'true_header' => $trueHeader,
             'preview_data' => $previewData,
             'mapping_proposals' => $mappingProposals,
+            // originalColumnIndex => displayName. ProcessImportJob resolves the
+            // mapping payload's column names through this rather than searching the
+            // raw header row, because a merged or synthesised name exists in no cell.
+            'header_columns' => $headerColumns,
         ];
+    }
+
+    /**
+     * Resolve a header row into originalColumnIndex => unique display name.
+     *
+     * The array KEY is the column's real position in the file and is what every
+     * consumer must read cells at. Compacting these away was the bug behind
+     * "columns after a blank one show the wrong data": the names were renumbered
+     * while the data rows they were paired with were not.
+     *
+     * Rules, applied in order:
+     *
+     *   1. A horizontal merge covering this row forward-fills its top-left value
+     *      across the range, so a header merged over three columns names all three
+     *      instead of leaving two of them headerless.
+     *   2. A non-empty cell keeps its own trimmed text.
+     *   3. An empty cell is kept only when some sample row has content beneath it,
+     *      named "Column D" after its spreadsheet letter — a column with real data
+     *      stays mappable even with no header. An empty cell over an empty column is
+     *      dropped; the columns after it keep their true indices regardless.
+     *   4. Names are made unique with a " (2)", " (3)" suffix. Two columns sharing a
+     *      name genuinely lose one downstream — the preview's associative array
+     *      collapses them, the job's array_search finds only the first, and the
+     *      mapping page's x-for hits a duplicate Alpine key — and rule 1 manufactures
+     *      exactly that situation, so this is a prerequisite for it rather than a
+     *      nicety.
+     *
+     * Deliberately NOT handled:
+     *   - Merged cells in the data body. "One asset spanning three rows" and "three
+     *     assets sharing a department" are byte-identical, and filling the wrong one
+     *     silently fabricates asset records. Left as the file has them.
+     *   - A header merged vertically across two header rows. Only one row is ever
+     *     the header here; the second is read as data.
+     *   - Any merge in a CSV. The format has no such concept, so those files get
+     *     rules 2-4 only.
+     *
+     * @param  array  $headerCells  Raw cells of the header row, original indices
+     * @param  array  $sampleRows   Rows below the header, used only by rule 3
+     * @param  array  $mergeRanges  ["A1:C1", ...] as OpenSpout reports them; [] for CSV
+     */
+    private function resolveHeaderColumns(array $headerCells, array $sampleRows, array $mergeRanges = []): array
+    {
+        $names = [];
+        foreach ($headerCells as $index => $value) {
+            $names[$index] = trim((string) $value);
+        }
+
+        foreach ($this->horizontalMergesForRow($mergeRanges, $names) as $from => $to) {
+            for ($i = $from + 1; $i <= $to; $i++) {
+                $names[$i] = $names[$from];
+            }
+        }
+
+        // A CSV header line can be shorter than its data lines, and a column with
+        // data but no header still needs a name, so the sweep runs to the widest row.
+        $width = count($headerCells);
+        foreach ($sampleRows as $row) {
+            $width = max($width, count($row));
+        }
+
+        $columns = [];
+        for ($index = 0; $index < $width; $index++) {
+            $name = $names[$index] ?? '';
+
+            if ($name === '') {
+                if (! $this->columnHasSampleData($sampleRows, $index)) {
+                    continue;
+                }
+                $name = 'Column ' . $this->columnIndexToLetter($index);
+            }
+
+            $columns[$index] = $name;
+        }
+
+        return $this->makeColumnNamesUnique($columns);
+    }
+
+    /**
+     * Pick out merge ranges that horizontally span part of this header row.
+     *
+     * Matched by shape rather than by row number on purpose. A merge ref names a
+     * physical sheet row, but both readers skip blank rows, so our row indices drift
+     * from the file's the moment there is an empty line above the table. Requiring
+     * the range's first cell to be filled and the rest of it empty verifies the range
+     * really does describe the row in hand, and costs nothing.
+     */
+    private function horizontalMergesForRow(array $mergeRanges, array $names): array
+    {
+        $groups = [];
+
+        foreach ($mergeRanges as $ref) {
+            if (! preg_match('/^([A-Z]+)(\d+):([A-Z]+)(\d+)$/i', (string) $ref, $matches)) {
+                continue;
+            }
+
+            // Spans more than one row: a two-row header, which we do not support.
+            if ($matches[2] !== $matches[4]) {
+                continue;
+            }
+
+            $from = $this->columnLetterToIndex($matches[1]);
+            $to   = $this->columnLetterToIndex($matches[3]);
+
+            if ($to <= $from || ($names[$from] ?? '') === '') {
+                continue;
+            }
+
+            for ($i = $from + 1; $i <= $to; $i++) {
+                if (($names[$i] ?? '') !== '') {
+                    continue 2;
+                }
+            }
+
+            $groups[$from] = $to;
+        }
+
+        return $groups;
+    }
+
+    private function columnHasSampleData(array $sampleRows, int $index): bool
+    {
+        foreach ($sampleRows as $row) {
+            if (trim((string) ($row[$index] ?? '')) !== '') {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Suffix duplicates until every name is distinct, including the case where the
+     * suffix itself collides with a literal name already in the file.
+     */
+    private function makeColumnNamesUnique(array $columns): array
+    {
+        $taken  = [];
+        $unique = [];
+
+        foreach ($columns as $index => $name) {
+            $candidate = $name;
+            $suffix    = 1;
+
+            while (isset($taken[$candidate])) {
+                $suffix++;
+                $candidate = $name . ' (' . $suffix . ')';
+            }
+
+            $taken[$candidate] = true;
+            $unique[$index]    = $candidate;
+        }
+
+        return $unique;
+    }
+
+    /**
+     * Whether an empty header cell sits between two filled ones — the only shape a
+     * merge lookup could explain, and the gate that keeps that lookup off the
+     * common path.
+     */
+    private function headerHasInteriorGap(array $headerCells): bool
+    {
+        $filled = [];
+        foreach ($headerCells as $index => $value) {
+            if (trim((string) $value) !== '') {
+                $filled[] = $index;
+            }
+        }
+
+        if (count($filled) < 2) {
+            return false;
+        }
+
+        return (max($filled) - min($filled) + 1) > count($filled);
+    }
+
+    /**
+     * Read merge ranges for one sheet. XLSX only — CSV has no such concept.
+     *
+     * Called only when the header has an interior gap, because it is not cheap:
+     * OpenSpout's SheetMergeCellsReader registers a callback that never stops the
+     * XML processor, and <mergeCells> follows <sheetData> in OOXML, so obtaining the
+     * ranges walks the whole sheet's XML. SheetManager does that while ENUMERATING
+     * sheets, so the cost lands once per sheet up to the target. Turning this on
+     * unconditionally would put an O(file) pass in front of the 100K-row imports the
+     * streaming reader exists to make possible.
+     *
+     * Failure is not fatal: without ranges the header still resolves under rules 2-4.
+     */
+    protected function readMergeRanges(string $filePath, int $sheetIndex): array
+    {
+        try {
+            $reader = new XlsxReader(new XlsxOptions(SHOULD_LOAD_MERGE_CELLS: true));
+            $reader->open($filePath);
+
+            $ranges  = [];
+            $current = 0;
+
+            foreach ($reader->getSheetIterator() as $sheet) {
+                if ($current === $sheetIndex) {
+                    $ranges = $sheet->getMergeCells();
+                    break;
+                }
+                $current++;
+            }
+
+            $reader->close();
+
+            return $ranges;
+        } catch (\Throwable $e) {
+            Log::warning('Merge range lookup failed, falling back to blank-cell rules: ' . $e->getMessage());
+
+            return [];
+        }
+    }
+
+    /**
+     * "A" => 0, "B" => 1, ... "AA" => 26.
+     */
+    private function columnLetterToIndex(string $letters): int
+    {
+        $index = 0;
+        foreach (str_split(strtoupper($letters)) as $char) {
+            $index = $index * 26 + (ord($char) - ord('A') + 1);
+        }
+
+        return $index - 1;
+    }
+
+    private function columnIndexToLetter(int $index): string
+    {
+        $letters = '';
+        $index++;
+
+        while ($index > 0) {
+            $remainder = ($index - 1) % 26;
+            $letters   = chr(ord('A') + $remainder) . $letters;
+            $index     = intdiv($index - 1 - $remainder, 26);
+        }
+
+        return $letters;
     }
 
     /**

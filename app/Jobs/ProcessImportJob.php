@@ -245,6 +245,15 @@ class ProcessImportJob implements ShouldQueue
         $expectedHeader = $importState['true_header'] ?? [];
         $mapping        = $this->mappingPayload['mapping'] ?? [];
 
+        // originalColumnIndex => displayName, resolved once by AssetImportService::peek().
+        //
+        // Read rather than re-derived: peek() may name a column from a merge range or
+        // synthesise one for a headerless column, and neither name exists in any cell,
+        // so searching the raw header row for it would miss or — worse — land on the
+        // merge's first column for every column in the range. Empty for import_state
+        // written before this shipped, which falls back to the raw-header search below.
+        $headerColumns = $importState['header_columns'] ?? [];
+
         // Set only when the user overrode header auto-detection on the mapping page.
         // It travels through import_state rather than the constructor deliberately:
         // adding a constructor argument would break every job already serialised in
@@ -315,12 +324,18 @@ class ProcessImportJob implements ShouldQueue
                     continue;
                 }
 
-                $getCombined = function (string $fieldId) use ($mapping, $header, $cells): string {
+                $getCombined = function (string $fieldId) use ($mapping, $header, $headerColumns, $cells): string {
                     $mapInfo = $mapping[$fieldId] ?? null;
                     if (!$mapInfo || empty($mapInfo['columns'])) return '';
                     $vals = [];
                     foreach ($mapInfo['columns'] as $colName) {
-                        $colIdx = array_search($colName, $header);
+                        // header_columns is keyed by the column's real position, so a
+                        // hit returns the index to read directly. Falling back to the
+                        // raw header keeps pre-existing import sessions working.
+                        $colIdx = !empty($headerColumns)
+                            ? array_search($colName, $headerColumns, true)
+                            : array_search($colName, $header);
+
                         if ($colIdx !== false && isset($cells[$colIdx]) && $cells[$colIdx] !== '') {
                             $vals[] = $cells[$colIdx];
                         }

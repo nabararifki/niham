@@ -94,6 +94,10 @@ class AssetImportController extends Controller
                 'true_header'       => $peekResult['true_header'],
                 'preview_data'      => $peekResult['preview_data'],
                 'mapping_proposals' => $peekResult['mapping_proposals'],
+                // originalColumnIndex => displayName. ProcessImportJob resolves the
+                // mapping payload through this, so the job reads the same column the
+                // preview showed even when a name was merged or synthesised.
+                'header_columns'    => $peekResult['header_columns'] ?? [],
                 'current_sheet_index' => 0,
                 // A fresh upload always starts on auto-detection; the user only
                 // overrides it if the guess turns out wrong.
@@ -203,6 +207,7 @@ class AssetImportController extends Controller
                         $cachedData['true_header']       = $peekResult['true_header'];
                         $cachedData['preview_data']      = $peekResult['preview_data'];
                         $cachedData['mapping_proposals'] = $peekResult['mapping_proposals'];
+                        $cachedData['header_columns']    = $peekResult['header_columns'] ?? [];
                         $cachedData['current_sheet_index'] = $sheetIndex;
                         $cachedData['selected_sheet']      = $requestedSheet;
                         // header_row_index is what ProcessImportJob reads; the choice

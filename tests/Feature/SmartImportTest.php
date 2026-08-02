@@ -2645,7 +2645,7 @@ class SmartImportTest extends TestCase
         $this->grantPermission('perm_assets', 'full access');
         $this->grantPermission('perm_categories', 'full access');
         $this->seedThreeStagingRows();
-        $this->seedBannerFile('cu0001');
+        $this->seedBannerFile('cc0001');
 
         $screens = [
             route('assets.index'),          // renders add-asset-modal (upload help icon)
@@ -2684,6 +2684,444 @@ class SmartImportTest extends TestCase
             $this->assertNotEquals($en, __('assets.'.$key, ['message' => 'x']),
                 "Key [{$key}] is not actually translated.");
         }
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // 13. COLUMN IDENTITY: BLANK COLUMNS, MERGED HEADERS, CSV PARITY
+    // ══════════════════════════════════════════════════════════════
+
+    /**
+     * Write a real .xlsx onto the faked local disk and return its relative path.
+     *
+     * The suite had no genuine XLSX fixture before this: every "xlsx" path was
+     * either a CSV body or an unparseable blob, so nothing ever exercised the XLSX
+     * reader. Merged headers and CSV/XLSX parity both need the real thing.
+     *
+     * $merges are [topLeftCol, topLeftRow, bottomRightCol, bottomRightRow] with
+     * columns 0-based and rows 1-based, matching OpenSpout's own signature.
+     */
+    private function seedXlsx(string $hexId, array $rows, array $merges = []): string
+    {
+        $relative = 'temp/import_'.$hexId.'.xlsx';
+        $absolute = \Illuminate\Support\Facades\Storage::disk('local')->path($relative);
+
+        @mkdir(dirname($absolute), 0775, true);
+
+        $options = new \OpenSpout\Writer\XLSX\Options();
+        foreach ($merges as $merge) {
+            $options->mergeCells(...$merge);
+        }
+
+        $writer = new \OpenSpout\Writer\XLSX\Writer($options);
+        $writer->openToFile($absolute);
+        foreach ($rows as $row) {
+            $writer->addRow(\OpenSpout\Common\Entity\Row::fromValues($row));
+        }
+        $writer->close();
+
+        return $relative;
+    }
+
+    private function seedCsvFile(string $hexId, string $body): string
+    {
+        $relative = 'temp/import_'.$hexId.'.csv';
+        \Illuminate\Support\Facades\Storage::disk('local')->put($relative, $body);
+
+        return $relative;
+    }
+
+    private function peekFile(string $relativePath): array
+    {
+        $absolute  = \Illuminate\Support\Facades\Storage::disk('local')->path($relativePath);
+        $extension = pathinfo($absolute, PATHINFO_EXTENSION);
+
+        return app(AssetImportService::class)->peek($absolute, $extension);
+    }
+
+    // ── 1. Blank column between two populated ones ───────────────────
+
+    /**
+     * The header names used to be compacted with array_values(array_filter(...))
+     * while the data rows they were paired against kept their original indices, so
+     * every column after a gap read its neighbour's cell and the last column's data
+     * was lost outright. Confirmed against the pre-fix code: "Category" came back
+     * empty and "Desk Chair" appeared nowhere.
+     */
+    public function test_a_blank_column_does_not_shift_the_columns_after_it(): void
+    {
+        $path = $this->seedCsvFile('bc0001', "Tag,,Category,Name\nA-1,,Chairs,Desk Chair\nA-2,,Tables,Big Table\n");
+
+        $result = $this->peekFile($path);
+
+        $this->assertSame(['Tag', 'Category', 'Name'], $result['true_header']);
+        $this->assertSame([
+            ['Tag' => 'A-1', 'Category' => 'Chairs', 'Name' => 'Desk Chair'],
+            ['Tag' => 'A-2', 'Category' => 'Tables', 'Name' => 'Big Table'],
+        ], $result['preview_data']);
+    }
+
+    public function test_a_blank_column_does_not_shift_the_columns_after_it_in_xlsx(): void
+    {
+        $path = $this->seedXlsx('bc0002', [
+            ['Tag', '', 'Category', 'Name'],
+            ['A-1', '', 'Chairs', 'Desk Chair'],
+        ]);
+
+        $result = $this->peekFile($path);
+
+        $this->assertSame(['Tag', 'Category', 'Name'], $result['true_header']);
+        $this->assertSame('Chairs', $result['preview_data'][0]['Category']);
+        $this->assertSame('Desk Chair', $result['preview_data'][0]['Name']);
+    }
+
+    /**
+     * A column carrying data but no header is still a column worth mapping, so it is
+     * named after its spreadsheet letter rather than dropped.
+     */
+    public function test_a_headerless_column_with_data_stays_mappable(): void
+    {
+        $path = $this->seedCsvFile('bc0003', "Tag,,Category\nA-1,SN-9,Chairs\n");
+
+        $result = $this->peekFile($path);
+
+        $this->assertSame(['Tag', 'Column B', 'Category'], $result['true_header']);
+        $this->assertSame('SN-9', $result['preview_data'][0]['Column B']);
+        $this->assertSame('Chairs', $result['preview_data'][0]['Category']);
+    }
+
+    /**
+     * Two columns sharing a name genuinely lost one: the preview's associative array
+     * collapsed them, the job's array_search found only the first, and the mapping
+     * page's x-for :key collided.
+     */
+    public function test_duplicate_header_names_both_survive_with_their_own_data(): void
+    {
+        $path = $this->seedCsvFile('bc0004', "Tag,Notes,Notes\nA-1,first,second\n");
+
+        $result = $this->peekFile($path);
+
+        $this->assertSame(['Tag', 'Notes', 'Notes (2)'], $result['true_header']);
+        $this->assertSame('first', $result['preview_data'][0]['Notes']);
+        $this->assertSame('second', $result['preview_data'][0]['Notes (2)']);
+    }
+
+    /**
+     * The preview being right is not enough — the value has to land in staging under
+     * the column the user actually mapped.
+     */
+    public function test_a_column_after_a_blank_one_imports_its_own_values(): void
+    {
+        $this->actingAs($this->userA);
+
+        $path = $this->seedCsvFile('bc0005', "Tag,,Name\nA-1,,Desk Chair\nA-2,,Big Table\n");
+
+        $this->get(route('assets.import-mapping'));
+        Cache::put('import_state_'.$this->userA->id, array_merge(
+            $this->peekFile($path),
+            ['temp_file_path' => $path, 'current_sheet_index' => 0, 'header_row_index' => null, 'header_row_choice' => 'auto']
+        ), 1800);
+
+        $this->postJson(route('assets.import.process-mapping'), [
+            'payload' => json_encode([
+                'temp_file_path' => $path,
+                'selected_sheet' => 0,
+                'mapping'        => [
+                    'tag'  => ['columns' => ['Tag'], 'separator' => ' '],
+                    'name' => ['columns' => ['Name'], 'separator' => ' '],
+                ],
+            ]),
+        ])->assertStatus(200);
+
+        $rows = \DB::table('temporary_asset_imports')
+            ->where('user_id', $this->userA->id)->orderBy('id')->get(['tag', 'name']);
+
+        $this->assertSame(['A-1', 'A-2'], $rows->pluck('tag')->all());
+        $this->assertSame(['Desk Chair', 'Big Table'], $rows->pluck('name')->all(),
+            'The Name column read the blank column beside it instead of its own.');
+    }
+
+    // ── 2. CSV parity for header row selection ───────────────────────
+
+    /**
+     * A genuine CSV upload, not a hand-seeded cache. Every existing fixture in this
+     * file writes 'sheets' => ['Sheet1'], which is the XLSX shape; OpenSpout reports
+     * a CSV's single sheet as '', and that is the one value the mapping page's
+     * hasMultipleSheets condition reads.
+     */
+    public function test_a_real_csv_upload_reports_a_single_unnamed_sheet(): void
+    {
+        $this->actingAs($this->userA);
+
+        $tmp = tempnam(sys_get_temp_dir(), 'csvup');
+        file_put_contents($tmp, "Report\nTag,Name,Category\nC-1,Chair,Seating\n");
+
+        $this->postJson(route('assets.import-parse'), [
+            'import_file' => new UploadedFile($tmp, 'assets.csv', 'text/csv', null, true),
+        ])->assertStatus(200)->assertJson(['success' => true]);
+
+        $state = Cache::get('import_state_'.$this->userA->id);
+        $this->assertSame([''], $state['sheets']);
+
+        @unlink($tmp);
+    }
+
+    public function test_manual_header_row_works_on_a_real_csv_upload(): void
+    {
+        $this->actingAs($this->userA);
+
+        $path = $this->seedCsvFile('ca0001', "ASSET REGISTER,FY2026,CONFIDENTIAL,DRAFT\nTag,Name,Category\nC-1,Chair,Seating\n");
+
+        Cache::put('import_state_'.$this->userA->id, array_merge(
+            $this->peekFile($path),
+            ['temp_file_path' => $path, 'current_sheet_index' => 0, 'header_row_index' => null, 'header_row_choice' => 'auto']
+        ), 1800);
+
+        // Auto picks the four-cell banner over the three-cell real header.
+        $this->assertSame(['ASSET REGISTER', 'FY2026', 'CONFIDENTIAL', 'DRAFT'],
+            Cache::get('import_state_'.$this->userA->id)['true_header']);
+
+        $this->get(route('assets.import-mapping', ['header_row' => 2]))->assertStatus(200);
+
+        $state = Cache::get('import_state_'.$this->userA->id);
+        $this->assertSame(['Tag', 'Name', 'Category'], $state['true_header']);
+        $this->assertSame(1, $state['header_row_index']);
+        $this->assertSame('2', $state['header_row_choice']);
+        $this->assertSame([['Tag' => 'C-1', 'Name' => 'Chair', 'Category' => 'Seating']], $state['preview_data']);
+    }
+
+    /**
+     * Same file content, both formats, same answer — so CSV and XLSX are proven
+     * equivalent rather than assumed so.
+     */
+    public function test_header_row_selection_and_auto_detection_agree_across_csv_and_xlsx(): void
+    {
+        $this->actingAs($this->userA);
+
+        $rows = [
+            ['ASSET REGISTER', 'FY2026', 'CONFIDENTIAL', 'DRAFT'],
+            ['Tag', 'Name', 'Category'],
+            ['C-1', 'Chair', 'Seating'],
+        ];
+
+        $csv  = $this->seedCsvFile('ba0011', "ASSET REGISTER,FY2026,CONFIDENTIAL,DRAFT\nTag,Name,Category\nC-1,Chair,Seating\n");
+        $xlsx = $this->seedXlsx('ba0012', $rows);
+
+        // Auto-detection: the same "most non-empty cells" answer for both.
+        $this->assertSame($this->peekFile($csv)['true_header'], $this->peekFile($xlsx)['true_header']);
+
+        // Manual override: likewise.
+        $service = app(AssetImportService::class);
+        $disk    = \Illuminate\Support\Facades\Storage::disk('local');
+
+        $csvManual  = $service->peek($disk->path($csv), 'csv', 0, 1);
+        $xlsxManual = $service->peek($disk->path($xlsx), 'xlsx', 0, 1);
+
+        $this->assertSame(['Tag', 'Name', 'Category'], $csvManual['true_header']);
+        $this->assertSame($csvManual['true_header'], $xlsxManual['true_header']);
+        $this->assertSame($csvManual['preview_data'], $xlsxManual['preview_data']);
+    }
+
+    /**
+     * The sheet control hides for a CSV; the header-row control must not go with it.
+     */
+    public function test_the_header_row_control_renders_for_a_csv_shaped_state(): void
+    {
+        $this->actingAs($this->userA);
+
+        $path = $this->seedCsvFile('ca0002', "Tag,Name,Category\nC-1,Chair,Seating\n");
+
+        Cache::put('import_state_'.$this->userA->id, array_merge(
+            $this->peekFile($path),
+            ['temp_file_path' => $path, 'current_sheet_index' => 0, 'header_row_index' => null, 'header_row_choice' => 'auto']
+        ), 1800);
+
+        $html = $this->get(route('assets.import-mapping'))->assertStatus(200)->getContent();
+
+        $this->assertStringContainsString('id="headerRowSelector"', $html);
+        $this->assertStringContainsString(__('assets.header_row_auto'), $html);
+        $this->assertStringContainsString(__('assets.header_row_option', ['number' => 15]), $html);
+
+        // The sheet <select> is inside x-if="hasMultipleSheets", so it is always in
+        // the source; what decides whether it opens is the hydration payload. Read
+        // that back rather than string-matching it — @json escapes the quotes.
+        preg_match('/sheets:\s*(\[.*?\]),/s', $html, $matches);
+        $this->assertNotEmpty($matches, 'Could not find the sheets payload on the page.');
+        $this->assertCount(1, json_decode(html_entity_decode($matches[1]), true),
+            'A CSV must hydrate exactly one sheet, or the sheet selector would open.');
+    }
+
+    // ── 3. Merged cells ──────────────────────────────────────────────
+
+    /**
+     * OpenSpout returns only a merged range's top-left value, the rest of the range
+     * coming back empty — verified directly against a written fixture. With
+     * SHOULD_LOAD_MERGE_CELLS it also reports the ranges, which is what lets the
+     * later columns be named instead of guessed at.
+     */
+    public function test_a_merged_header_names_every_column_it_spans(): void
+    {
+        $path = $this->seedXlsx('de0001', [
+            ['Purchase Info', '', '', 'Tag'],
+            ['2024-01-01', '1500', 'VendorX', 'A-1'],
+            ['2024-02-01', '2500', 'VendorY', 'A-2'],
+        ], [[0, 1, 2, 1]]);
+
+        $result = $this->peekFile($path);
+
+        $this->assertSame(
+            ['Purchase Info', 'Purchase Info (2)', 'Purchase Info (3)', 'Tag'],
+            $result['true_header']
+        );
+
+        // Each spanned column still reads its own cell.
+        $this->assertSame([
+            'Purchase Info'     => '2024-01-01',
+            'Purchase Info (2)' => '1500',
+            'Purchase Info (3)' => 'VendorX',
+            'Tag'               => 'A-1',
+        ], $result['preview_data'][0]);
+    }
+
+    /**
+     * A merged name exists in no cell of the file, so the job cannot re-derive it by
+     * searching the raw header — it has to read the map peek() resolved.
+     */
+    public function test_a_merged_header_column_imports_through_to_staging(): void
+    {
+        $this->actingAs($this->userA);
+
+        $path = $this->seedXlsx('de0002', [
+            ['Identity', '', 'Category'],
+            ['A-1', 'Desk Chair', 'Seating'],
+            ['A-2', 'Big Table', 'Seating'],
+        ], [[0, 1, 1, 1]]);
+
+        Cache::put('import_state_'.$this->userA->id, array_merge(
+            $this->peekFile($path),
+            ['temp_file_path' => $path, 'current_sheet_index' => 0, 'header_row_index' => null, 'header_row_choice' => 'auto']
+        ), 1800);
+
+        $this->postJson(route('assets.import.process-mapping'), [
+            'payload' => json_encode([
+                'temp_file_path' => $path,
+                'selected_sheet' => 0,
+                'mapping'        => [
+                    'tag'  => ['columns' => ['Identity'], 'separator' => ' '],
+                    'name' => ['columns' => ['Identity (2)'], 'separator' => ' '],
+                ],
+            ]),
+        ])->assertStatus(200);
+
+        $rows = \DB::table('temporary_asset_imports')
+            ->where('user_id', $this->userA->id)->orderBy('id')->get(['tag', 'name']);
+
+        $this->assertSame(['A-1', 'A-2'], $rows->pluck('tag')->all());
+        $this->assertSame(['Desk Chair', 'Big Table'], $rows->pluck('name')->all(),
+            'The second half of the merged header resolved back to the merge\'s first column.');
+    }
+
+    /**
+     * Locks in the deliberate non-behaviour: a vertical merge in the data body is
+     * ambiguous — "one asset over three rows" and "three assets sharing a value" are
+     * byte-identical — so it is left exactly as the file has it rather than filled.
+     */
+    public function test_merged_data_cells_are_left_alone(): void
+    {
+        $path = $this->seedXlsx('de0003', [
+            ['Tag', 'Department'],
+            ['A-1', 'Facilities'],
+            ['A-2', ''],
+            ['A-3', ''],
+        ], [[1, 2, 1, 4]]);
+
+        $result = $this->peekFile($path);
+
+        $this->assertSame(['Tag', 'Department'], $result['true_header']);
+        $this->assertSame('Facilities', $result['preview_data'][0]['Department']);
+        $this->assertSame('', $result['preview_data'][1]['Department']);
+        $this->assertSame('', $result['preview_data'][2]['Department']);
+    }
+
+    /**
+     * A CSV cannot carry merge information at all, so the same visual shape falls
+     * through to the blank-cell rules — the spanned columns are named positionally,
+     * not guessed as continuations of their neighbour.
+     */
+    public function test_a_csv_with_the_shape_of_a_merged_header_uses_the_documented_fallback(): void
+    {
+        $path = $this->seedCsvFile('de0004', "Purchase Info,,,Tag\n2024-01-01,1500,VendorX,A-1\n");
+
+        $result = $this->peekFile($path);
+
+        $this->assertSame(['Purchase Info', 'Column B', 'Column C', 'Tag'], $result['true_header']);
+        $this->assertSame('1500', $result['preview_data'][0]['Column B']);
+        $this->assertSame('VendorX', $result['preview_data'][0]['Column C']);
+    }
+
+    /**
+     * The merge lookup walks the whole sheet XML, so it must stay off the common
+     * path. A gapless header must not trigger it.
+     */
+    public function test_the_merge_lookup_only_runs_when_the_header_has_a_gap(): void
+    {
+        $spy = new class extends AssetImportService
+        {
+            public int $mergeLookups = 0;
+
+            protected function readMergeRanges(string $filePath, int $sheetIndex): array
+            {
+                $this->mergeLookups++;
+
+                return parent::readMergeRanges($filePath, $sheetIndex);
+            }
+        };
+
+        $disk    = \Illuminate\Support\Facades\Storage::disk('local');
+        $gapless = $this->seedXlsx('fb0001', [['Tag', 'Name', 'Category'], ['A-1', 'Chair', 'Seating']]);
+        $gapped  = $this->seedXlsx('fb0002', [['Tag', '', 'Category'], ['A-1', 'Chair', 'Seating']]);
+
+        $spy->peek($disk->path($gapless), 'xlsx');
+        $this->assertSame(0, $spy->mergeLookups,
+            'A clean header must not pay for the full-sheet XML walk merge ranges cost.');
+
+        $spy->peek($disk->path($gapped), 'xlsx');
+        $this->assertSame(1, $spy->mergeLookups);
+
+        // CSV can carry no merge information, so it must never trigger the lookup
+        // even with the same gap shape.
+        $csvGapped = $this->seedCsvFile('fb0003', "Tag,,Category\nA-1,Chair,Seating\n");
+        $spy->peek($disk->path($csvGapped), 'csv');
+        $this->assertSame(1, $spy->mergeLookups);
+    }
+
+    public function test_only_an_interior_gap_counts_as_a_gap(): void
+    {
+        $method = (new \ReflectionClass(AssetImportService::class))->getMethod('headerHasInteriorGap');
+        $method->setAccessible(true);
+        $instance = app(AssetImportService::class);
+
+        $this->assertFalse($method->invoke($instance, ['Tag', 'Name', 'Category']));
+        $this->assertFalse($method->invoke($instance, ['Tag', 'Name', '']), 'A trailing blank is not an interior gap.');
+        $this->assertFalse($method->invoke($instance, ['', 'Tag']), 'A leading blank is not an interior gap.');
+        $this->assertTrue($method->invoke($instance, ['Tag', '', 'Category']));
+    }
+
+    /**
+     * The rewrite must be a no-op on ordinary files — no synthesised names, no
+     * suffixes, no reordering.
+     */
+    public function test_an_ordinary_file_is_unchanged_by_the_rewrite(): void
+    {
+        $path = $this->seedCsvFile('fa0001', "Tag,Name,Category,Status\nA-1,Chair,Seating,Active\n");
+
+        $result = $this->peekFile($path);
+
+        $this->assertSame(['Tag', 'Name', 'Category', 'Status'], $result['true_header']);
+        $this->assertSame([['Tag' => 'A-1', 'Name' => 'Chair', 'Category' => 'Seating', 'Status' => 'Active']],
+            $result['preview_data']);
+        $this->assertSame('Tag', $result['mapping_proposals']['tag']);
+        $this->assertSame('Category', $result['mapping_proposals']['category']);
+        $this->assertSame([0 => 'Tag', 1 => 'Name', 2 => 'Category', 3 => 'Status'], $result['header_columns']);
     }
 }
 
