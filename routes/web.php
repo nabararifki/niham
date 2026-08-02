@@ -62,6 +62,7 @@ Route::middleware('auth')->group(function () {
         Route::get('/import/status', 'status')->name('import-status');
         Route::get('/import-rapid-add', 'rapidAdd')->name('import-rapid-add');
         Route::post('/import-rapid-add', 'storeRapidAdd')->name('import-rapid-add.store');
+        Route::post('/import/quick-add-entity', 'quickAddEntity')->name('import.quick-add-entity');
         Route::get('/import-review', 'review')->name('import-review');
         Route::post('/import/store-batch', 'storeBatch')->name('import-store-batch');
         Route::post('/import-calculate-validation', 'calculateValidation')->name('import-calculate-validation');

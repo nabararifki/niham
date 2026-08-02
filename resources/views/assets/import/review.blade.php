@@ -31,13 +31,25 @@
         // review paginates server-side at 50/page, and letting a selection span
         // pages the user can't see is worse than making them re-select.
         $pageRowIds = collect($paginatedData->items())->pluck('id')->map(fn ($id) => (int) $id)->values();
+
+        // The bulk-edit header selects render from Alpine state, not from Blade.
+        // They live inside <template x-if="selectionCount > 0">, and Alpine re-clones
+        // an x-if body from the pristine template every time the condition flips —
+        // so an <option> appended to the live DOM is discarded the next time the
+        // selection is cleared and remade, and when nothing is selected the <select>
+        // is not in the document to append to at all. Driving them from an array
+        // quick-add can push into is the only thing that survives both.
+        $entityOptions = [
+            'category'   => $categories->map(fn ($c) => ['id' => (int) $c->id, 'name' => $c->name])->values(),
+            'department' => $departments->map(fn ($d) => ['id' => (int) $d->id, 'name' => $d->name])->values(),
+        ];
     @endphp
 
     {{-- @js, not @json: these happen to be integers today, but @json emits literal
          double quotes for any string value, which would terminate this attribute. --}}
     <div class="py-8"
          @keydown.escape.window="onEscape()"
-         x-data="importReview({ validCount: @js($validCount), invalidCount: @js($invalidCount), invalidPages: @js($invalidPages), total: @js($total), pageRowIds: @js($pageRowIds) })">
+         x-data="importReview({ validCount: @js($validCount), invalidCount: @js($invalidCount), invalidPages: @js($invalidPages), total: @js($total), pageRowIds: @js($pageRowIds), categories: @js($entityOptions['category']), departments: @js($entityOptions['department']) })">
         <div class="max-w-7xl mx-auto sm:px-6 lg:px-8 space-y-6">
 
             {{-- ─── Progress Stepper (Top) ─────────────────────────────────────── --}}
@@ -185,28 +197,50 @@
                                             </template>
                                         </th>
 
+                                        {{-- The quick-add trigger sits beside the label, OUTSIDE the
+                                             x-if holding the bulk widget, so it is present in both
+                                             header states — a missing category is worth creating
+                                             whether or not rows happen to be selected right now. --}}
                                         <th class="{{ $thClass }}">
-                                            <div :class="selectionCount > 0 ? 'text-[10px] leading-tight' : ''">{{ __('assets.category') }} *</div>
+                                            <div class="flex items-center gap-1"
+                                                 :class="selectionCount > 0 ? 'text-[10px] leading-tight' : ''">
+                                                <span>{{ __('assets.category') }} *</span>
+                                                @include('assets.import.partials.quick-add-trigger', [
+                                                    'entityType'  => 'category',
+                                                    'modelClass'  => \App\Models\Category::class,
+                                                    'tooltipText' => __('assets.quick_add_category'),
+                                                ])
+                                            </div>
+                                            {{-- Options come from Alpine state, not Blade — see the
+                                                 $entityOptions note at the top of this file. --}}
                                             <template x-if="selectionCount > 0">
                                                 <select @change="bulkUpdate('category_id', $event.target.value)"
                                                         class="{{ $bulkInput }} w-36">
                                                     <option value="">{{ __('assets.select_placeholder') }}</option>
-                                                    @foreach($categories as $cat)
-                                                        <option value="{{ $cat->id }}">{{ $cat->name }}</option>
-                                                    @endforeach
+                                                    <template x-for="option in categories" :key="option.id">
+                                                        <option :value="option.id" x-text="option.name"></option>
+                                                    </template>
                                                 </select>
                                             </template>
                                         </th>
 
                                         <th class="{{ $thClass }}">
-                                            <div :class="selectionCount > 0 ? 'text-[10px] leading-tight' : ''">{{ __('assets.department') }} *</div>
+                                            <div class="flex items-center gap-1"
+                                                 :class="selectionCount > 0 ? 'text-[10px] leading-tight' : ''">
+                                                <span>{{ __('assets.department') }} *</span>
+                                                @include('assets.import.partials.quick-add-trigger', [
+                                                    'entityType'  => 'department',
+                                                    'modelClass'  => \App\Models\Department::class,
+                                                    'tooltipText' => __('assets.quick_add_department'),
+                                                ])
+                                            </div>
                                             <template x-if="selectionCount > 0">
                                                 <select @change="bulkUpdate('department_id', $event.target.value)"
                                                         class="{{ $bulkInput }} w-36">
                                                     <option value="">{{ __('assets.select_placeholder') }}</option>
-                                                    @foreach($departments as $dept)
-                                                        <option value="{{ $dept->id }}">{{ $dept->name }}</option>
-                                                    @endforeach
+                                                    <template x-for="option in departments" :key="option.id">
+                                                        <option :value="option.id" x-text="option.name"></option>
+                                                    </template>
                                                 </select>
                                             </template>
                                         </th>
@@ -316,6 +350,46 @@
                                                       aria-hidden="true">
                                                     <svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="3" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
                                                 </span>
+
+                                                {{-- A cell whose value could not be converted to its column's
+                                                     type. Amber, not the red invalid styling: these rows are
+                                                     valid and will import — it is only the offending value that
+                                                     gets dropped at save, and until now that happened silently.
+
+                                                     Teleported like the quick-add tooltip: the table sits in an
+                                                     overflow-x-auto wrapper, which computes overflow-y to auto
+                                                     as well and would clip an absolutely-positioned tooltip. --}}
+                                                @if (!empty($coercionNotes[$item['id']] ?? []))
+                                                    <span class="group relative inline-flex align-middle ml-1"
+                                                          x-data="{ tip: false, tx: 0, ty: 0 }"
+                                                          @click.stop
+                                                          @mouseenter="tip = true; tx = $event.clientX; ty = $event.clientY"
+                                                          @mousemove="tx = $event.clientX; ty = $event.clientY"
+                                                          @mouseleave="tip = false">
+                                                        <span tabindex="0"
+                                                              data-coercion-warning="{{ $item['id'] }}"
+                                                              @focus="tip = true; tx = $el.getBoundingClientRect().left; ty = $el.getBoundingClientRect().bottom"
+                                                              @blur="tip = false"
+                                                              aria-label="{{ __('assets.coercion_row_warning') }}"
+                                                              class="text-amber-500 group-hover:text-amber-600 focus:text-amber-600 transition-colors focus:outline-none">
+                                                            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                                                      d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
+                                                            </svg>
+                                                        </span>
+                                                        <template x-teleport="body">
+                                                            <div role="tooltip" x-show="tip" x-cloak
+                                                                 x-transition.opacity.duration.150ms
+                                                                 class="fixed z-[300] w-72 max-w-[calc(100vw-2rem)] rounded-lg bg-gray-900 dark:bg-gray-700 px-3 py-2 text-xs font-normal normal-case text-left leading-relaxed text-white shadow-2xl ring-1 ring-black/10 pointer-events-none"
+                                                                 :style="`top: ${ty + 18}px; left: ${Math.min(tx + 12, window.innerWidth - 304)}px;`">
+                                                                <p class="font-semibold mb-1">{{ __('assets.coercion_row_warning') }}</p>
+                                                                @foreach ($coercionNotes[$item['id']] as $field => $rawValue)
+                                                                    <p>{{ __('assets.coercion_note_' . ($field === 'purchase_date' ? 'date' : 'cost'), ['value' => $rawValue]) }}</p>
+                                                                @endforeach
+                                                            </div>
+                                                        </template>
+                                                    </span>
+                                                @endif
                                             </td>
 
                                             {{-- Tag --}}
@@ -342,6 +416,7 @@
                                             <td class="px-2 py-2.5 whitespace-nowrap">
                                                 <select name="assets[{{ $localIndex }}][category_id]"
                                                         @change="autoSave('category_id', $event.target.value, $data)"
+                                                        data-entity-select="category"
                                                         class="block w-36 border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:ring-accent focus:border-accent text-xs dark:bg-gray-900/50 dark:text-white">
                                                     <option value="">{{ __('assets.select_placeholder') }}</option>
                                                     @foreach($categories as $cat)
@@ -357,6 +432,7 @@
                                             <td class="px-2 py-2.5 whitespace-nowrap">
                                                 <select name="assets[{{ $localIndex }}][department_id]"
                                                         @change="autoSave('department_id', $event.target.value, $data)"
+                                                        data-entity-select="department"
                                                         class="block w-36 border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:ring-accent focus:border-accent text-xs dark:bg-gray-900/50 dark:text-white">
                                                     <option value="">{{ __('assets.select_placeholder') }}</option>
                                                     @foreach($departments as $dept)
@@ -590,6 +666,95 @@
                 </div>
             </dialog>
 
+            {{-- Quick Add Category/Department Modal.
+
+                 Deliberately not a <form>: the review table is already wrapped in
+                 #review-form, and while this dialog sits outside it, a nested form
+                 here would be one more thing that can accidentally submit the page.
+                 Fields are plain inputs bound with x-model and posted with fetch,
+                 the same way every other write on this page works.
+
+                 Both entity types share one dialog — they differ only by title and
+                 the Executive Oversight checkbox, which no category has. --}}
+            <dialog id="quick_add_entity_modal" class="modal modal-bottom sm:modal-middle backdrop-blur-sm">
+                <div class="modal-box bg-white/95 dark:bg-gray-800/95 backdrop-blur-md border border-gray-200/50 dark:border-gray-700/50 shadow-2xl rounded-2xl p-6 text-gray-900 dark:text-gray-100">
+                    <div class="flex justify-between items-center pb-4 border-b border-gray-200/50 dark:border-gray-700/50 mb-4">
+                        <h3 class="font-bold text-lg text-gray-900 dark:text-white" x-text="quickAddTitleText"></h3>
+                        <form method="dialog">
+                            <button @click="closeQuickAdd()" class="text-gray-500 hover:text-gray-700 dark:hover:text-gray-300">
+                                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                            </button>
+                        </form>
+                    </div>
+
+                    <div class="space-y-4">
+                        {{-- Name --}}
+                        <div>
+                            <label for="quick_add_name" class="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                                {{ __('messages.name') }} <span class="text-red-500">*</span>
+                            </label>
+                            <input type="text" id="quick_add_name" x-model="quickAddName" maxlength="255"
+                                   @keydown.enter.prevent="submitQuickAdd()"
+                                   class="mt-1 block w-full border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:ring-accent focus:border-accent text-sm dark:bg-gray-900/50 dark:text-white" />
+                            <template x-for="msg in (quickAddErrors.name || [])" :key="msg">
+                                <p class="mt-1 text-xs text-red-600 dark:text-red-400" x-text="msg"></p>
+                            </template>
+                        </div>
+
+                        {{-- Code — optional. Blank means the server generates one, the
+                             same way Rapid-Add does for entities it creates. --}}
+                        <div>
+                            <label for="quick_add_code" class="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                                {{ __('messages.code') }}
+                            </label>
+                            <input type="text" id="quick_add_code" x-model="quickAddCode" maxlength="255"
+                                   @keydown.enter.prevent="submitQuickAdd()"
+                                   class="mt-1 block w-full border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:ring-accent focus:border-accent text-sm dark:bg-gray-900/50 dark:text-white" />
+                            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ __('assets.quick_add_code_hint') }}</p>
+                            <template x-for="msg in (quickAddErrors.code || [])" :key="msg">
+                                <p class="mt-1 text-xs text-red-600 dark:text-red-400" x-text="msg"></p>
+                            </template>
+                        </div>
+
+                        {{-- Notes --}}
+                        <div>
+                            <label for="quick_add_notes" class="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                                {{ __('messages.notes') }}
+                            </label>
+                            <textarea id="quick_add_notes" x-model="quickAddNotes" maxlength="200" rows="2"
+                                      placeholder="{{ __('messages.add_note_placeholder') }}"
+                                      class="mt-1 block w-full border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:ring-accent focus:border-accent text-sm dark:bg-gray-900/50 dark:text-white"></textarea>
+                            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ __('messages.max_200_chars') }}</p>
+                            <template x-for="msg in (quickAddErrors.notes || [])" :key="msg">
+                                <p class="mt-1 text-xs text-red-600 dark:text-red-400" x-text="msg"></p>
+                            </template>
+                        </div>
+
+                        {{-- Executive Oversight — departments only; the column does not
+                             exist on categories and is not fillable there. --}}
+                        <div x-show="quickAddType === 'department'" x-cloak>
+                            <label class="flex items-center">
+                                <input type="checkbox" x-model="quickAddOversight"
+                                       class="h-4 w-4 text-accent border-gray-300 dark:border-gray-700 dark:bg-gray-900/50 rounded focus:ring-accent">
+                                <span class="ml-2 text-sm text-gray-600 dark:text-gray-300">{{ __('messages.executive_oversight') }}</span>
+                            </label>
+                        </div>
+                    </div>
+
+                    <div class="modal-action border-t border-gray-200/50 dark:border-gray-700/50 pt-4 mt-4 flex justify-end gap-3">
+                        <button type="button" @click="closeQuickAdd()"
+                                class="btn btn-sm btn-ghost border border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg">
+                            {{ __('messages.cancel') }}
+                        </button>
+                        <button type="button" @click="submitQuickAdd()" :disabled="quickAddSaving"
+                                class="btn btn-sm bg-accent border-transparent text-white hover:opacity-90 rounded-lg disabled:opacity-50">
+                            <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
+                            {{ __('messages.save') }}
+                        </button>
+                    </div>
+                </div>
+            </dialog>
+
             {{-- Row Context Menu — Blade-rendered and localized, not the native menu.
                  Positioned at the cursor; openRowMenu() decides whether we're even
                  allowed to take over the right-click. --}}
@@ -627,10 +792,23 @@
                 invalidPages: config.invalidPages || [],
                 totalRows: config.total || 0,
                 pageRowIds: config.pageRowIds || [],
+                // Backing store for the bulk-edit header selects. Reactive because
+                // those selects sit inside an x-if and get re-cloned from their
+                // template whenever the selection starts and stops.
+                categories: config.categories || [],
+                departments: config.departments || [],
                 selectedIds: [],
                 menuOpen: false,
                 menuX: 0,
                 menuY: 0,
+
+                quickAddType: 'category',
+                quickAddName: '',
+                quickAddCode: '',
+                quickAddNotes: '',
+                quickAddOversight: false,
+                quickAddErrors: {},
+                quickAddSaving: false,
 
                 get validText() {
                     return @json(__('assets.preflight_valid_rows', ['count' => '__COUNT__'])).replace('__COUNT__', Number(this.validCount).toLocaleString());
@@ -666,6 +844,12 @@
                 get deleteConfirmText() {
                     if (this.selectionCount <= 1) return @js(__('assets.delete_row_confirm'));
                     return @json(__('assets.delete_rows_confirm', ['count' => '__COUNT__'])).replace('__COUNT__', Number(this.selectionCount).toLocaleString());
+                },
+
+                get quickAddTitleText() {
+                    return this.quickAddType === 'department'
+                        ? @js(__('messages.add_new_department'))
+                        : @js(__('messages.add_new_category'));
                 },
 
                 isSelected(rowId) { return this.selectedIds.includes(rowId); },
@@ -712,6 +896,113 @@
                 },
 
                 closeRowMenu() { this.menuOpen = false; },
+
+                // ── Quick add category / department ──────────────────────────
+                openQuickAdd(entityType) {
+                    this.quickAddType      = entityType;
+                    this.quickAddName      = '';
+                    this.quickAddCode      = '';
+                    this.quickAddNotes     = '';
+                    this.quickAddOversight = false;
+                    this.quickAddErrors    = {};
+                    this.closeRowMenu();
+                    document.getElementById('quick_add_entity_modal').showModal();
+                },
+
+                closeQuickAdd() {
+                    document.getElementById('quick_add_entity_modal').close();
+                },
+
+                async submitQuickAdd() {
+                    if (this.quickAddSaving) return;
+                    this.quickAddSaving = true;
+                    this.quickAddErrors = {};
+
+                    try {
+                        const response = await fetch('{{ route("assets.import.quick-add-entity") }}', {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'X-CSRF-TOKEN': '{{ csrf_token() }}',
+                                'X-Requested-With': 'XMLHttpRequest',
+                                'Accept': 'application/json'
+                            },
+                            body: JSON.stringify({
+                                entity_type: this.quickAddType,
+                                name: this.quickAddName,
+                                code: this.quickAddCode,
+                                notes: this.quickAddNotes,
+                                // Only meaningful for a department; the server ignores
+                                // it outright for a category.
+                                is_executive_oversight: this.quickAddOversight
+                            })
+                        });
+
+                        // 422 is the normal "you left the name blank" path, so it stays
+                        // inside the modal next to the field rather than becoming an alert.
+                        if (response.status === 422) {
+                            const payload = await response.json();
+                            this.quickAddErrors = payload.errors || {};
+                            if (!payload.errors && payload.message) {
+                                this.quickAddErrors = { name: [payload.message] };
+                            }
+                            return;
+                        }
+
+                        if (!response.ok) {
+                            throw new Error(response.status === 403
+                                ? @js(__('messages.unauthorized'))
+                                : 'Request failed');
+                        }
+
+                        const data = await response.json();
+                        if (!data.success) {
+                            throw new Error(data.message || 'Request failed');
+                        }
+
+                        this.addEntityOption(data.entity);
+                        this.closeQuickAdd();
+                    } catch (err) {
+                        console.error('Quick add failed:', err);
+                        {{-- @js, not @json: @json splits its expression on commas and
+                             would swallow the ['message' => ...] argument. --}}
+                        const message = @js(__('assets.quick_add_error', ['message' => '__MSG__']))
+                            .replace('__MSG__', err.message);
+                        alert(message);
+                    } finally {
+                        this.quickAddSaving = false;
+                    }
+                },
+
+                // Make the new entity selectable everywhere it belongs, without a
+                // reload — a reload would cost the user their page, selection and any
+                // in-flight edits, which is the whole reason this modal exists.
+                //
+                // Two mechanisms, because the two kinds of select differ:
+                //
+                //  - the bulk-edit header select is inside x-if, so Alpine throws its
+                //    DOM away and rebuilds it from the template each time a selection
+                //    starts. Only pushing into the reactive array survives that, and
+                //    when nothing is selected the select does not exist to touch.
+                //  - the per-row selects are plain server-rendered markup that is
+                //    always present, so they are updated in place. Rebuilding them
+                //    from state would mean re-deriving 50 rows' current values.
+                addEntityOption(entity) {
+                    const list = entity.type === 'department' ? this.departments : this.categories;
+
+                    // The server orders by name; insert in place rather than appending
+                    // so the list does not drift out of order mid-session.
+                    const at = list.findIndex((option) => option.name.localeCompare(entity.name) > 0);
+                    list.splice(at === -1 ? list.length : at, 0, { id: entity.id, name: entity.name });
+
+                    document.querySelectorAll(`select[data-entity-select="${entity.type}"]`).forEach((select) => {
+                        const option = new Option(entity.name, entity.id);
+                        const before = [...select.options].find(
+                            (o) => o.value !== '' && o.text.trim().localeCompare(entity.name) > 0
+                        );
+                        select.add(option, before || null);
+                    });
+                },
 
                 // ── Bulk column edit ─────────────────────────────────────────
                 // One request for the whole selection. Fanning this out into a

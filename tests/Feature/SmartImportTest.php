@@ -10,6 +10,7 @@ use App\Models\Property;
 use App\Models\Role;
 use App\Models\User;
 use App\Services\AssetImportService;
+use App\Services\EntityCodeGeneratorService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Cache;
@@ -2282,6 +2283,1344 @@ class SmartImportTest extends TestCase
             app()->setLocale('id');
             $this->assertNotEquals($en, __('assets.'.$key), "Key [{$key}] is not actually translated.");
         }
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // 12. QUICK ADD CATEGORY / DEPARTMENT FROM THE REVIEW PAGE
+    // ══════════════════════════════════════════════════════════════
+
+    /**
+     * Grant userA a permission string on the RBAC module that gates this entity.
+     *
+     * Set through the real column the policy reads rather than by mocking Gate:
+     * the whole point of these tests is that quick-add goes through the same
+     * hasPermission() matrix the create forms do, including its non-obvious
+     * compound values ('create & update' grants create, 'update' does not).
+     */
+    private function grantPermission(string $module, string $permission): void
+    {
+        $this->userA->role->update([$module => $permission]);
+        $this->userA->refresh()->load('role');
+    }
+
+    private function quickAdd(array $payload)
+    {
+        return $this->postJson(route('assets.import.quick-add-entity'), $payload);
+    }
+
+    public function test_quick_add_is_refused_without_the_create_permission(): void
+    {
+        $this->actingAs($this->userA);
+
+        // RoleFactory defaults every perm_* to 'no access', so this is the
+        // out-of-the-box state, not a contrived one.
+        $this->quickAdd(['entity_type' => 'category', 'name' => 'Furniture'])
+            ->assertStatus(403);
+        $this->quickAdd(['entity_type' => 'department', 'name' => 'Housekeeping'])
+            ->assertStatus(403);
+
+        $this->assertDatabaseMissing('categories', ['name' => 'FURNITURE']);
+        $this->assertDatabaseMissing('departments', ['name' => 'HOUSEKEEPING']);
+    }
+
+    /**
+     * Each permission string is exercised against the real policy, so a shortcut
+     * like `$perm === 'create'` in the controller would fail here rather than
+     * silently locking out everyone on a compound permission.
+     */
+    public function test_quick_add_honours_every_permission_string_that_grants_create(): void
+    {
+        $this->actingAs($this->userA);
+
+        foreach (['full access', 'create', 'create & update', 'create & delete'] as $i => $permission) {
+            $this->grantPermission('perm_categories', $permission);
+            $this->quickAdd(['entity_type' => 'category', 'name' => 'Allowed '.$i])
+                ->assertStatus(200);
+        }
+
+        foreach (['no access', 'update', 'delete', 'update & delete'] as $i => $permission) {
+            $this->grantPermission('perm_categories', $permission);
+            $this->quickAdd(['entity_type' => 'category', 'name' => 'Refused '.$i])
+                ->assertStatus(403);
+        }
+
+        $this->assertSame(4, Category::where('property_id', $this->propertyA->id)
+            ->where('name', 'like', 'ALLOWED%')->count());
+        $this->assertSame(0, Category::where('property_id', $this->propertyA->id)
+            ->where('name', 'like', 'REFUSED%')->count());
+    }
+
+    /**
+     * Category and Department are gated by separate RBAC modules — holding one
+     * must not imply the other.
+     */
+    public function test_category_and_department_permissions_are_independent(): void
+    {
+        $this->actingAs($this->userA);
+        $this->grantPermission('perm_categories', 'full access');
+
+        $this->quickAdd(['entity_type' => 'category', 'name' => 'Linens'])->assertStatus(200);
+        $this->quickAdd(['entity_type' => 'department', 'name' => 'Linens'])->assertStatus(403);
+    }
+
+    /**
+     * The generated code must be byte-identical to what the Categories screen
+     * would produce, so it is compared against the service itself rather than a
+     * hardcoded string that could drift from the generator.
+     */
+    public function test_a_blank_code_is_generated_by_the_same_service_the_rest_of_the_app_uses(): void
+    {
+        $this->actingAs($this->userA);
+        $this->grantPermission('perm_categories', 'full access');
+
+        $expected = app(EntityCodeGeneratorService::class)
+            ->generateUniqueCode('WORKSTATIONS', Category::class, $this->propertyA->id);
+
+        $this->quickAdd(['entity_type' => 'category', 'name' => 'Workstations', 'code' => ''])
+            ->assertStatus(200)
+            ->assertJsonPath('entity.code', $expected);
+
+        $this->assertDatabaseHas('categories', [
+            'property_id' => $this->propertyA->id,
+            'name'        => 'WORKSTATIONS',
+            'code'        => $expected,
+        ]);
+    }
+
+    /**
+     * The happy path only exercises the generator's first branch. Two names
+     * sharing a 3-char prefix force it into its collision fallbacks, which is
+     * where a re-implementation would most plausibly disagree.
+     */
+    public function test_generated_codes_stay_unique_when_names_share_a_prefix(): void
+    {
+        $this->actingAs($this->userA);
+        $this->grantPermission('perm_categories', 'full access');
+
+        $codes = [];
+        foreach (['Cabling', 'Cabinets', 'Cabins'] as $name) {
+            $response = $this->quickAdd(['entity_type' => 'category', 'name' => $name])
+                ->assertStatus(200);
+            $codes[] = $response->json('entity.code');
+        }
+
+        $this->assertCount(3, array_unique($codes), 'Generated codes collided: '.implode(', ', $codes));
+    }
+
+    public function test_a_supplied_code_is_kept_and_both_fields_are_upper_cased(): void
+    {
+        $this->actingAs($this->userA);
+        $this->grantPermission('perm_departments', 'full access');
+
+        $this->quickAdd([
+            'entity_type' => 'department',
+            'name'        => 'front office',
+            'code'        => 'fo',
+        ])->assertStatus(200);
+
+        // Matches CategoryController/DepartmentController::store, which upper-case
+        // both fields before persisting.
+        $this->assertDatabaseHas('departments', [
+            'property_id' => $this->propertyA->id,
+            'name'        => 'FRONT OFFICE',
+            'code'        => 'FO',
+        ]);
+    }
+
+    public function test_notes_are_stored_when_given(): void
+    {
+        $this->actingAs($this->userA);
+        $this->grantPermission('perm_categories', 'full access');
+
+        $this->quickAdd([
+            'entity_type' => 'category',
+            'name'        => 'Vehicles',
+            'notes'       => 'Fleet only',
+        ])->assertStatus(200);
+
+        $this->assertDatabaseHas('categories', ['name' => 'VEHICLES', 'notes' => 'Fleet only']);
+    }
+
+    /**
+     * The flag has to reach the column hasExecutiveOversight() actually reads,
+     * not just be accepted by validation.
+     */
+    public function test_executive_oversight_applies_to_a_department(): void
+    {
+        $this->actingAs($this->userA);
+        $this->grantPermission('perm_departments', 'full access');
+
+        $this->quickAdd([
+            'entity_type'            => 'department',
+            'name'                   => 'Executive',
+            'is_executive_oversight' => true,
+        ])->assertStatus(200);
+
+        $this->quickAdd([
+            'entity_type' => 'department',
+            'name'        => 'Laundry',
+        ])->assertStatus(200);
+
+        $executive = Department::where('name', 'EXECUTIVE')->firstOrFail();
+        $laundry   = Department::where('name', 'LAUNDRY')->firstOrFail();
+
+        $this->assertTrue((bool) $executive->is_executive_oversight);
+        $this->assertFalse((bool) $laundry->is_executive_oversight);
+
+        $member = User::factory()->create([
+            'property_id'   => $this->propertyA->id,
+            'role_id'       => $this->userA->role_id,
+            'department_id' => $executive->id,
+        ]);
+        $this->assertTrue($member->hasExecutiveOversight());
+    }
+
+    /**
+     * Categories have no such column. The request must not error, and must not
+     * smuggle the attribute through — a mass-assignment change on Category would
+     * otherwise turn this into a silent write.
+     */
+    public function test_executive_oversight_is_ignored_for_a_category(): void
+    {
+        $this->actingAs($this->userA);
+        $this->grantPermission('perm_categories', 'full access');
+
+        $this->quickAdd([
+            'entity_type'            => 'category',
+            'name'                   => 'Appliances',
+            'is_executive_oversight' => true,
+        ])->assertStatus(200);
+
+        $category = Category::where('name', 'APPLIANCES')->firstOrFail();
+        $this->assertArrayNotHasKey('is_executive_oversight', $category->getAttributes());
+    }
+
+    /**
+     * Same rules as CategoryController::store, with the single deliberate
+     * exception that code may be blank (it is generated instead).
+     */
+    public function test_validation_matches_the_existing_creation_path(): void
+    {
+        $this->actingAs($this->userA);
+        $this->grantPermission('perm_categories', 'full access');
+
+        $this->quickAdd(['entity_type' => 'category'])
+            ->assertStatus(422)->assertJsonValidationErrors('name');
+
+        $this->quickAdd(['entity_type' => 'category', 'name' => str_repeat('a', 256)])
+            ->assertStatus(422)->assertJsonValidationErrors('name');
+
+        $this->quickAdd(['entity_type' => 'category', 'name' => 'Ok', 'code' => str_repeat('a', 256)])
+            ->assertStatus(422)->assertJsonValidationErrors('code');
+
+        $this->quickAdd(['entity_type' => 'category', 'name' => 'Ok', 'notes' => str_repeat('a', 256)])
+            ->assertStatus(422)->assertJsonValidationErrors('notes');
+
+        $this->quickAdd(['entity_type' => 'location', 'name' => 'Ok'])
+            ->assertStatus(422)->assertJsonValidationErrors('entity_type');
+
+        $this->assertSame(1, Category::where('property_id', $this->propertyA->id)->count(),
+            'Only the setUp fixture should exist — no invalid request wrote a row.');
+    }
+
+    public function test_quick_add_entities_belong_to_the_callers_property(): void
+    {
+        $this->actingAs($this->userA);
+        $this->grantPermission('perm_categories', 'full access');
+
+        $this->quickAdd(['entity_type' => 'category', 'name' => 'Signage'])->assertStatus(200);
+
+        $created = Category::withoutGlobalScopes()->where('name', 'SIGNAGE')->firstOrFail();
+        $this->assertSame($this->propertyA->id, $created->property_id);
+
+        // And it must not leak into the other tenant's review page.
+        $this->actingAs($this->userB);
+        $this->assertSame(0, Category::where('property_id', $this->propertyB->id)
+            ->where('name', 'SIGNAGE')->count());
+    }
+
+    /**
+     * A super-admin has no property_id of their own; every other creation path in
+     * the app reads session('active_property_id') instead, and so must this one.
+     */
+    public function test_super_admin_creates_against_the_active_session_property(): void
+    {
+        $superAdmin = User::factory()->create([
+            'is_super_admin' => true,
+            'property_id'    => null,
+            'department_id'  => null,
+        ]);
+
+        $this->actingAs($superAdmin)
+            ->withSession(['active_property_id' => $this->propertyB->id]);
+
+        $this->quickAdd(['entity_type' => 'category', 'name' => 'Global'])->assertStatus(200);
+
+        $created = Category::withoutGlobalScopes()->where('name', 'GLOBAL')->firstOrFail();
+        $this->assertSame($this->propertyB->id, $created->property_id);
+    }
+
+    public function test_super_admin_without_an_active_property_is_refused(): void
+    {
+        $superAdmin = User::factory()->create([
+            'is_super_admin' => true,
+            'property_id'    => null,
+            'department_id'  => null,
+        ]);
+
+        $this->actingAs($superAdmin);
+        $this->quickAdd(['entity_type' => 'category', 'name' => 'Orphan'])->assertStatus(422);
+
+        $this->assertSame(0, Category::withoutGlobalScopes()->where('name', 'ORPHAN')->count());
+    }
+
+    // ── Review page rendering ────────────────────────────────────────
+
+    public function test_the_quick_add_trigger_is_absent_without_the_permission(): void
+    {
+        $this->actingAs($this->userA);
+        $this->seedThreeStagingRows();
+
+        $html = $this->get(route('assets.import-review'))->assertStatus(200)->getContent();
+
+        // Absent from the DOM entirely, not merely disabled.
+        $this->assertStringNotContainsString('data-quick-add="category"', $html);
+        $this->assertStringNotContainsString('data-quick-add="department"', $html);
+        $this->assertStringNotContainsString(__('assets.quick_add_category'), $html);
+    }
+
+    public function test_the_quick_add_trigger_renders_per_entity_permission(): void
+    {
+        $this->actingAs($this->userA);
+        $this->seedThreeStagingRows();
+        $this->grantPermission('perm_categories', 'create');
+
+        $html = $this->get(route('assets.import-review'))->assertStatus(200)->getContent();
+
+        $this->assertStringContainsString('data-quick-add="category"', $html);
+        $this->assertStringContainsString(__('assets.quick_add_category'), $html);
+
+        // perm_departments is still 'no access' — one permission must not imply the other.
+        $this->assertStringNotContainsString('data-quick-add="department"', $html);
+    }
+
+    /**
+     * The two kinds of select are updated by different mechanisms and each has its
+     * own way of going wrong, so both are pinned here.
+     *
+     * The bulk-edit header select sits inside <template x-if="selectionCount > 0">.
+     * Alpine rebuilds an x-if body from the pristine template every time the
+     * condition flips, and when nothing is selected the select is not in the document
+     * at all — so appending an <option> to it, as the row selects are updated, was
+     * silently lost. Its options must come from component state instead.
+     */
+    public function test_the_bulk_header_select_renders_from_state_rather_than_blade(): void
+    {
+        $this->actingAs($this->userA);
+        $this->seedThreeStagingRows();
+
+        $html = $this->get(route('assets.import-review'))->assertStatus(200)->getContent();
+
+        // Driven by the array quick-add pushes into...
+        $this->assertStringContainsString('x-for="option in categories"', $html);
+        $this->assertStringContainsString('x-for="option in departments"', $html);
+
+        // ...and seeded with what the server knows, so the first render is complete.
+        $this->assertSame(
+            [['id' => $this->categoryA->id, 'name' => $this->categoryA->name]],
+            $this->alpineConfigValue($html, 'categories')
+        );
+    }
+
+    /**
+     * Pull one key out of the importReview() config in the rendered page.
+     *
+     * @js compiles to JSON.parse('...') with every quote written as ", so the
+     * payload has to be unescaped before it is JSON again.
+     */
+    private function alpineConfigValue(string $html, string $key): array
+    {
+        preg_match('/'.preg_quote($key, '/').':\s*JSON\.parse\(\'(.*?)\'\)/s', $html, $matches);
+        $this->assertNotEmpty($matches, "The [{$key}] payload is missing from the component config.");
+
+        $json = preg_replace_callback(
+            '/\\\\u([0-9a-fA-F]{4})/',
+            fn ($m) => mb_chr(hexdec($m[1])),
+            $matches[1]
+        );
+
+        return json_decode($json, true) ?? [];
+    }
+
+    public function test_a_new_entity_reaches_both_the_row_selects_and_the_header_payload(): void
+    {
+        $this->actingAs($this->userA);
+        $this->seedThreeStagingRows();
+        $this->grantPermission('perm_categories', 'full access');
+
+        $this->quickAdd(['entity_type' => 'category', 'name' => 'Zippers'])->assertStatus(200);
+        $created = Category::where('name', 'ZIPPERS')->firstOrFail();
+
+        $html = $this->get(route('assets.import-review'))->assertStatus(200)->getContent();
+
+        // Per-row selects: plain markup, always present, updated in place by id.
+        $this->assertSame(
+            3,
+            substr_count($html, 'data-entity-select="category"'),
+            'Expected one marker per staging row and none on the header select.'
+        );
+        $this->assertSame(3, substr_count($html, 'value="'.$created->id.'"'));
+
+        // Header select: fed from the component config, which must carry it too.
+        $names = array_column($this->alpineConfigValue($html, 'categories'), 'name');
+
+        $this->assertContains('ZIPPERS', $names);
+        $this->assertSame($names, collect($names)->sort()->values()->all(),
+            'The payload must stay name-ordered, matching what review() queries.');
+    }
+
+    /**
+     * Applies to the whole Smart Import flow, not just the new icon: a
+     * question-mark cursor reads as a broken page, so hover colour is the only
+     * affordance these triggers use.
+     */
+    public function test_no_smart_import_screen_uses_a_help_cursor(): void
+    {
+        $this->actingAs($this->userA);
+        $this->grantPermission('perm_assets', 'full access');
+        $this->grantPermission('perm_categories', 'full access');
+        $this->seedThreeStagingRows();
+        $this->seedBannerFile('cc0001');
+
+        $screens = [
+            route('assets.index'),          // renders add-asset-modal (upload help icon)
+            route('assets.import-mapping'), // status help icon + department "Fixed" badge
+            route('assets.import-review'),  // the new quick-add triggers
+        ];
+
+        foreach ($screens as $url) {
+            $html = $this->get($url)->assertStatus(200)->getContent();
+            $this->assertStringNotContainsString('cursor-help', $html, "cursor-help still present on {$url}");
+        }
+    }
+
+    public function test_quick_add_copy_follows_the_active_locale(): void
+    {
+        $this->actingAs($this->userA);
+        $this->seedThreeStagingRows();
+        $this->grantPermission('perm_categories', 'full access');
+        $this->grantPermission('perm_departments', 'full access');
+
+        foreach (['en', 'id'] as $locale) {
+            app()->setLocale($locale);
+            $this->get(route('assets.import-review'))
+                ->assertStatus(200)
+                ->assertSee(__('assets.quick_add_category'), false)
+                ->assertSee(__('assets.quick_add_department'), false)
+                ->assertSee(__('assets.quick_add_code_hint'), false)
+                ->assertSee(__('messages.add_new_category'), false)
+                ->assertSee(__('messages.executive_oversight'), false);
+        }
+
+        foreach (['quick_add_category', 'quick_add_department', 'quick_add_code_hint', 'quick_add_error'] as $key) {
+            app()->setLocale('en');
+            $en = __('assets.'.$key, ['message' => 'x']);
+            app()->setLocale('id');
+            $this->assertNotEquals($en, __('assets.'.$key, ['message' => 'x']),
+                "Key [{$key}] is not actually translated.");
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // 13. COLUMN IDENTITY: BLANK COLUMNS, MERGED HEADERS, CSV PARITY
+    // ══════════════════════════════════════════════════════════════
+
+    /**
+     * Write a real .xlsx onto the faked local disk and return its relative path.
+     *
+     * The suite had no genuine XLSX fixture before this: every "xlsx" path was
+     * either a CSV body or an unparseable blob, so nothing ever exercised the XLSX
+     * reader. Merged headers and CSV/XLSX parity both need the real thing.
+     *
+     * $merges are [topLeftCol, topLeftRow, bottomRightCol, bottomRightRow] with
+     * columns 0-based and rows 1-based, matching OpenSpout's own signature.
+     */
+    private function seedXlsx(string $hexId, array $rows, array $merges = []): string
+    {
+        $relative = 'temp/import_'.$hexId.'.xlsx';
+        $absolute = \Illuminate\Support\Facades\Storage::disk('local')->path($relative);
+
+        @mkdir(dirname($absolute), 0775, true);
+
+        $options = new \OpenSpout\Writer\XLSX\Options();
+        foreach ($merges as $merge) {
+            $options->mergeCells(...$merge);
+        }
+
+        $writer = new \OpenSpout\Writer\XLSX\Writer($options);
+        $writer->openToFile($absolute);
+        foreach ($rows as $row) {
+            // A row given as Cell objects is written as-is, so a caller can attach a
+            // number format. That matters more than it sounds: OpenSpout only reads
+            // a date back as DateTimeImmutable when the cell carries a date format —
+            // a bare DateTimeImmutable round-trips as its Excel serial instead.
+            $writer->addRow(
+                $row instanceof \OpenSpout\Common\Entity\Row
+                    ? $row
+                    : \OpenSpout\Common\Entity\Row::fromValues($row)
+            );
+        }
+        $writer->close();
+
+        return $relative;
+    }
+
+    /**
+     * A cell that reads back as a real DateTimeImmutable rather than a serial.
+     */
+    private function dateCell(string $date): \OpenSpout\Common\Entity\Cell
+    {
+        return \OpenSpout\Common\Entity\Cell::fromValue(
+            new \DateTimeImmutable($date),
+            (new \OpenSpout\Common\Entity\Style\Style())->withFormat('yyyy-mm-dd')
+        );
+    }
+
+    /**
+     * A duration cell, which reads back as DateInterval.
+     */
+    private function durationCell(string $spec): \OpenSpout\Common\Entity\Cell
+    {
+        return \OpenSpout\Common\Entity\Cell::fromValue(
+            new \DateInterval($spec),
+            (new \OpenSpout\Common\Entity\Style\Style())->withFormat('[h]:mm:ss')
+        );
+    }
+
+    private function seedCsvFile(string $hexId, string $body): string
+    {
+        $relative = 'temp/import_'.$hexId.'.csv';
+        \Illuminate\Support\Facades\Storage::disk('local')->put($relative, $body);
+
+        return $relative;
+    }
+
+    private function peekFile(string $relativePath): array
+    {
+        $absolute  = \Illuminate\Support\Facades\Storage::disk('local')->path($relativePath);
+        $extension = pathinfo($absolute, PATHINFO_EXTENSION);
+
+        return app(AssetImportService::class)->peek($absolute, $extension);
+    }
+
+    // ── 1. Blank column between two populated ones ───────────────────
+
+    /**
+     * The header names used to be compacted with array_values(array_filter(...))
+     * while the data rows they were paired against kept their original indices, so
+     * every column after a gap read its neighbour's cell and the last column's data
+     * was lost outright. Confirmed against the pre-fix code: "Category" came back
+     * empty and "Desk Chair" appeared nowhere.
+     */
+    public function test_a_blank_column_does_not_shift_the_columns_after_it(): void
+    {
+        $path = $this->seedCsvFile('bc0001', "Tag,,Category,Name\nA-1,,Chairs,Desk Chair\nA-2,,Tables,Big Table\n");
+
+        $result = $this->peekFile($path);
+
+        $this->assertSame(['Tag', 'Category', 'Name'], $result['true_header']);
+        $this->assertSame([
+            ['Tag' => 'A-1', 'Category' => 'Chairs', 'Name' => 'Desk Chair'],
+            ['Tag' => 'A-2', 'Category' => 'Tables', 'Name' => 'Big Table'],
+        ], $result['preview_data']);
+    }
+
+    public function test_a_blank_column_does_not_shift_the_columns_after_it_in_xlsx(): void
+    {
+        $path = $this->seedXlsx('bc0002', [
+            ['Tag', '', 'Category', 'Name'],
+            ['A-1', '', 'Chairs', 'Desk Chair'],
+        ]);
+
+        $result = $this->peekFile($path);
+
+        $this->assertSame(['Tag', 'Category', 'Name'], $result['true_header']);
+        $this->assertSame('Chairs', $result['preview_data'][0]['Category']);
+        $this->assertSame('Desk Chair', $result['preview_data'][0]['Name']);
+    }
+
+    /**
+     * A column carrying data but no header is still a column worth mapping, so it is
+     * named after its spreadsheet letter rather than dropped.
+     */
+    public function test_a_headerless_column_with_data_stays_mappable(): void
+    {
+        $path = $this->seedCsvFile('bc0003', "Tag,,Category\nA-1,SN-9,Chairs\n");
+
+        $result = $this->peekFile($path);
+
+        $this->assertSame(['Tag', 'Column B', 'Category'], $result['true_header']);
+        $this->assertSame('SN-9', $result['preview_data'][0]['Column B']);
+        $this->assertSame('Chairs', $result['preview_data'][0]['Category']);
+    }
+
+    /**
+     * Two columns sharing a name genuinely lost one: the preview's associative array
+     * collapsed them, the job's array_search found only the first, and the mapping
+     * page's x-for :key collided.
+     */
+    public function test_duplicate_header_names_both_survive_with_their_own_data(): void
+    {
+        $path = $this->seedCsvFile('bc0004', "Tag,Notes,Notes\nA-1,first,second\n");
+
+        $result = $this->peekFile($path);
+
+        $this->assertSame(['Tag', 'Notes', 'Notes (2)'], $result['true_header']);
+        $this->assertSame('first', $result['preview_data'][0]['Notes']);
+        $this->assertSame('second', $result['preview_data'][0]['Notes (2)']);
+    }
+
+    /**
+     * The preview being right is not enough — the value has to land in staging under
+     * the column the user actually mapped.
+     */
+    public function test_a_column_after_a_blank_one_imports_its_own_values(): void
+    {
+        $this->actingAs($this->userA);
+
+        $path = $this->seedCsvFile('bc0005', "Tag,,Name\nA-1,,Desk Chair\nA-2,,Big Table\n");
+
+        $this->get(route('assets.import-mapping'));
+        Cache::put('import_state_'.$this->userA->id, array_merge(
+            $this->peekFile($path),
+            ['temp_file_path' => $path, 'current_sheet_index' => 0, 'header_row_index' => null, 'header_row_choice' => 'auto']
+        ), 1800);
+
+        $this->postJson(route('assets.import.process-mapping'), [
+            'payload' => json_encode([
+                'temp_file_path' => $path,
+                'selected_sheet' => 0,
+                'mapping'        => [
+                    'tag'  => ['columns' => ['Tag'], 'separator' => ' '],
+                    'name' => ['columns' => ['Name'], 'separator' => ' '],
+                ],
+            ]),
+        ])->assertStatus(200);
+
+        $rows = \DB::table('temporary_asset_imports')
+            ->where('user_id', $this->userA->id)->orderBy('id')->get(['tag', 'name']);
+
+        $this->assertSame(['A-1', 'A-2'], $rows->pluck('tag')->all());
+        $this->assertSame(['Desk Chair', 'Big Table'], $rows->pluck('name')->all(),
+            'The Name column read the blank column beside it instead of its own.');
+    }
+
+    // ── 2. CSV parity for header row selection ───────────────────────
+
+    /**
+     * A genuine CSV upload, not a hand-seeded cache. Every existing fixture in this
+     * file writes 'sheets' => ['Sheet1'], which is the XLSX shape; OpenSpout reports
+     * a CSV's single sheet as '', and that is the one value the mapping page's
+     * hasMultipleSheets condition reads.
+     */
+    public function test_a_real_csv_upload_reports_a_single_unnamed_sheet(): void
+    {
+        $this->actingAs($this->userA);
+
+        $tmp = tempnam(sys_get_temp_dir(), 'csvup');
+        file_put_contents($tmp, "Report\nTag,Name,Category\nC-1,Chair,Seating\n");
+
+        $this->postJson(route('assets.import-parse'), [
+            'import_file' => new UploadedFile($tmp, 'assets.csv', 'text/csv', null, true),
+        ])->assertStatus(200)->assertJson(['success' => true]);
+
+        $state = Cache::get('import_state_'.$this->userA->id);
+        $this->assertSame([''], $state['sheets']);
+
+        @unlink($tmp);
+    }
+
+    public function test_manual_header_row_works_on_a_real_csv_upload(): void
+    {
+        $this->actingAs($this->userA);
+
+        $path = $this->seedCsvFile('ca0001', "ASSET REGISTER,FY2026,CONFIDENTIAL,DRAFT\nTag,Name,Category\nC-1,Chair,Seating\n");
+
+        Cache::put('import_state_'.$this->userA->id, array_merge(
+            $this->peekFile($path),
+            ['temp_file_path' => $path, 'current_sheet_index' => 0, 'header_row_index' => null, 'header_row_choice' => 'auto']
+        ), 1800);
+
+        // Auto picks the four-cell banner over the three-cell real header.
+        $this->assertSame(['ASSET REGISTER', 'FY2026', 'CONFIDENTIAL', 'DRAFT'],
+            Cache::get('import_state_'.$this->userA->id)['true_header']);
+
+        $this->get(route('assets.import-mapping', ['header_row' => 2]))->assertStatus(200);
+
+        $state = Cache::get('import_state_'.$this->userA->id);
+        $this->assertSame(['Tag', 'Name', 'Category'], $state['true_header']);
+        $this->assertSame(1, $state['header_row_index']);
+        $this->assertSame('2', $state['header_row_choice']);
+        $this->assertSame([['Tag' => 'C-1', 'Name' => 'Chair', 'Category' => 'Seating']], $state['preview_data']);
+    }
+
+    /**
+     * Same file content, both formats, same answer — so CSV and XLSX are proven
+     * equivalent rather than assumed so.
+     */
+    public function test_header_row_selection_and_auto_detection_agree_across_csv_and_xlsx(): void
+    {
+        $this->actingAs($this->userA);
+
+        $rows = [
+            ['ASSET REGISTER', 'FY2026', 'CONFIDENTIAL', 'DRAFT'],
+            ['Tag', 'Name', 'Category'],
+            ['C-1', 'Chair', 'Seating'],
+        ];
+
+        $csv  = $this->seedCsvFile('ba0011', "ASSET REGISTER,FY2026,CONFIDENTIAL,DRAFT\nTag,Name,Category\nC-1,Chair,Seating\n");
+        $xlsx = $this->seedXlsx('ba0012', $rows);
+
+        // Auto-detection: the same "most non-empty cells" answer for both.
+        $this->assertSame($this->peekFile($csv)['true_header'], $this->peekFile($xlsx)['true_header']);
+
+        // Manual override: likewise.
+        $service = app(AssetImportService::class);
+        $disk    = \Illuminate\Support\Facades\Storage::disk('local');
+
+        $csvManual  = $service->peek($disk->path($csv), 'csv', 0, 1);
+        $xlsxManual = $service->peek($disk->path($xlsx), 'xlsx', 0, 1);
+
+        $this->assertSame(['Tag', 'Name', 'Category'], $csvManual['true_header']);
+        $this->assertSame($csvManual['true_header'], $xlsxManual['true_header']);
+        $this->assertSame($csvManual['preview_data'], $xlsxManual['preview_data']);
+    }
+
+    /**
+     * The sheet control hides for a CSV; the header-row control must not go with it.
+     */
+    public function test_the_header_row_control_renders_for_a_csv_shaped_state(): void
+    {
+        $this->actingAs($this->userA);
+
+        $path = $this->seedCsvFile('ca0002', "Tag,Name,Category\nC-1,Chair,Seating\n");
+
+        Cache::put('import_state_'.$this->userA->id, array_merge(
+            $this->peekFile($path),
+            ['temp_file_path' => $path, 'current_sheet_index' => 0, 'header_row_index' => null, 'header_row_choice' => 'auto']
+        ), 1800);
+
+        $html = $this->get(route('assets.import-mapping'))->assertStatus(200)->getContent();
+
+        $this->assertStringContainsString('id="headerRowSelector"', $html);
+        $this->assertStringContainsString(__('assets.header_row_auto'), $html);
+        $this->assertStringContainsString(__('assets.header_row_option', ['number' => 15]), $html);
+
+        // The sheet <select> is inside x-if="hasMultipleSheets", so it is always in
+        // the source; what decides whether it opens is the hydration payload. Read
+        // that back rather than string-matching it — @json escapes the quotes.
+        preg_match('/sheets:\s*(\[.*?\]),/s', $html, $matches);
+        $this->assertNotEmpty($matches, 'Could not find the sheets payload on the page.');
+        $this->assertCount(1, json_decode(html_entity_decode($matches[1]), true),
+            'A CSV must hydrate exactly one sheet, or the sheet selector would open.');
+    }
+
+    // ── 3. Merged cells ──────────────────────────────────────────────
+
+    /**
+     * OpenSpout returns only a merged range's top-left value, the rest of the range
+     * coming back empty — verified directly against a written fixture. With
+     * SHOULD_LOAD_MERGE_CELLS it also reports the ranges, which is what lets the
+     * later columns be named instead of guessed at.
+     */
+    public function test_a_merged_header_names_every_column_it_spans(): void
+    {
+        $path = $this->seedXlsx('de0001', [
+            ['Purchase Info', '', '', 'Tag'],
+            ['2024-01-01', '1500', 'VendorX', 'A-1'],
+            ['2024-02-01', '2500', 'VendorY', 'A-2'],
+        ], [[0, 1, 2, 1]]);
+
+        $result = $this->peekFile($path);
+
+        $this->assertSame(
+            ['Purchase Info', 'Purchase Info (2)', 'Purchase Info (3)', 'Tag'],
+            $result['true_header']
+        );
+
+        // Each spanned column still reads its own cell.
+        $this->assertSame([
+            'Purchase Info'     => '2024-01-01',
+            'Purchase Info (2)' => '1500',
+            'Purchase Info (3)' => 'VendorX',
+            'Tag'               => 'A-1',
+        ], $result['preview_data'][0]);
+    }
+
+    /**
+     * A merged name exists in no cell of the file, so the job cannot re-derive it by
+     * searching the raw header — it has to read the map peek() resolved.
+     */
+    public function test_a_merged_header_column_imports_through_to_staging(): void
+    {
+        $this->actingAs($this->userA);
+
+        $path = $this->seedXlsx('de0002', [
+            ['Identity', '', 'Category'],
+            ['A-1', 'Desk Chair', 'Seating'],
+            ['A-2', 'Big Table', 'Seating'],
+        ], [[0, 1, 1, 1]]);
+
+        Cache::put('import_state_'.$this->userA->id, array_merge(
+            $this->peekFile($path),
+            ['temp_file_path' => $path, 'current_sheet_index' => 0, 'header_row_index' => null, 'header_row_choice' => 'auto']
+        ), 1800);
+
+        $this->postJson(route('assets.import.process-mapping'), [
+            'payload' => json_encode([
+                'temp_file_path' => $path,
+                'selected_sheet' => 0,
+                'mapping'        => [
+                    'tag'  => ['columns' => ['Identity'], 'separator' => ' '],
+                    'name' => ['columns' => ['Identity (2)'], 'separator' => ' '],
+                ],
+            ]),
+        ])->assertStatus(200);
+
+        $rows = \DB::table('temporary_asset_imports')
+            ->where('user_id', $this->userA->id)->orderBy('id')->get(['tag', 'name']);
+
+        $this->assertSame(['A-1', 'A-2'], $rows->pluck('tag')->all());
+        $this->assertSame(['Desk Chair', 'Big Table'], $rows->pluck('name')->all(),
+            'The second half of the merged header resolved back to the merge\'s first column.');
+    }
+
+    /**
+     * Locks in the deliberate non-behaviour: a vertical merge in the data body is
+     * ambiguous — "one asset over three rows" and "three assets sharing a value" are
+     * byte-identical — so it is left exactly as the file has it rather than filled.
+     */
+    public function test_merged_data_cells_are_left_alone(): void
+    {
+        $path = $this->seedXlsx('de0003', [
+            ['Tag', 'Department'],
+            ['A-1', 'Facilities'],
+            ['A-2', ''],
+            ['A-3', ''],
+        ], [[1, 2, 1, 4]]);
+
+        $result = $this->peekFile($path);
+
+        $this->assertSame(['Tag', 'Department'], $result['true_header']);
+        $this->assertSame('Facilities', $result['preview_data'][0]['Department']);
+        $this->assertSame('', $result['preview_data'][1]['Department']);
+        $this->assertSame('', $result['preview_data'][2]['Department']);
+    }
+
+    /**
+     * A CSV cannot carry merge information at all, so the same visual shape falls
+     * through to the blank-cell rules — the spanned columns are named positionally,
+     * not guessed as continuations of their neighbour.
+     */
+    public function test_a_csv_with_the_shape_of_a_merged_header_uses_the_documented_fallback(): void
+    {
+        $path = $this->seedCsvFile('de0004', "Purchase Info,,,Tag\n2024-01-01,1500,VendorX,A-1\n");
+
+        $result = $this->peekFile($path);
+
+        $this->assertSame(['Purchase Info', 'Column B', 'Column C', 'Tag'], $result['true_header']);
+        $this->assertSame('1500', $result['preview_data'][0]['Column B']);
+        $this->assertSame('VendorX', $result['preview_data'][0]['Column C']);
+    }
+
+    /**
+     * The merge lookup walks the whole sheet XML, so it must stay off the common
+     * path. A gapless header must not trigger it.
+     */
+    public function test_the_merge_lookup_only_runs_when_the_header_has_a_gap(): void
+    {
+        $spy = new class extends AssetImportService
+        {
+            public int $mergeLookups = 0;
+
+            protected function readMergeRanges(string $filePath, int $sheetIndex): array
+            {
+                $this->mergeLookups++;
+
+                return parent::readMergeRanges($filePath, $sheetIndex);
+            }
+        };
+
+        $disk    = \Illuminate\Support\Facades\Storage::disk('local');
+        $gapless = $this->seedXlsx('fb0001', [['Tag', 'Name', 'Category'], ['A-1', 'Chair', 'Seating']]);
+        $gapped  = $this->seedXlsx('fb0002', [['Tag', '', 'Category'], ['A-1', 'Chair', 'Seating']]);
+
+        $spy->peek($disk->path($gapless), 'xlsx');
+        $this->assertSame(0, $spy->mergeLookups,
+            'A clean header must not pay for the full-sheet XML walk merge ranges cost.');
+
+        $spy->peek($disk->path($gapped), 'xlsx');
+        $this->assertSame(1, $spy->mergeLookups);
+
+        // CSV can carry no merge information, so it must never trigger the lookup
+        // even with the same gap shape.
+        $csvGapped = $this->seedCsvFile('fb0003', "Tag,,Category\nA-1,Chair,Seating\n");
+        $spy->peek($disk->path($csvGapped), 'csv');
+        $this->assertSame(1, $spy->mergeLookups);
+    }
+
+    public function test_only_an_interior_gap_counts_as_a_gap(): void
+    {
+        $method = (new \ReflectionClass(AssetImportService::class))->getMethod('headerHasInteriorGap');
+        $method->setAccessible(true);
+        $instance = app(AssetImportService::class);
+
+        $this->assertFalse($method->invoke($instance, ['Tag', 'Name', 'Category']));
+        $this->assertFalse($method->invoke($instance, ['Tag', 'Name', '']), 'A trailing blank is not an interior gap.');
+        $this->assertFalse($method->invoke($instance, ['', 'Tag']), 'A leading blank is not an interior gap.');
+        $this->assertTrue($method->invoke($instance, ['Tag', '', 'Category']));
+    }
+
+    /**
+     * The rewrite must be a no-op on ordinary files — no synthesised names, no
+     * suffixes, no reordering.
+     */
+    public function test_an_ordinary_file_is_unchanged_by_the_rewrite(): void
+    {
+        $path = $this->seedCsvFile('fa0001', "Tag,Name,Category,Status\nA-1,Chair,Seating,Active\n");
+
+        $result = $this->peekFile($path);
+
+        $this->assertSame(['Tag', 'Name', 'Category', 'Status'], $result['true_header']);
+        $this->assertSame([['Tag' => 'A-1', 'Name' => 'Chair', 'Category' => 'Seating', 'Status' => 'Active']],
+            $result['preview_data']);
+        $this->assertSame('Tag', $result['mapping_proposals']['tag']);
+        $this->assertSame('Category', $result['mapping_proposals']['category']);
+        $this->assertSame([0 => 'Tag', 1 => 'Name', 2 => 'Category', 3 => 'Status'], $result['header_columns']);
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // 14. TYPE COERCION (cell type vs target column type)
+    // ══════════════════════════════════════════════════════════════
+
+    /**
+     * Run a mapping against a file and return the staging rows it produced.
+     */
+    private function importFile(string $path, array $mapping): \Illuminate\Support\Collection
+    {
+        Cache::put('import_state_'.$this->userA->id, array_merge(
+            $this->peekFile($path),
+            ['temp_file_path' => $path, 'current_sheet_index' => 0, 'header_row_index' => null, 'header_row_choice' => 'auto']
+        ), 1800);
+
+        $this->postJson(route('assets.import.process-mapping'), [
+            'payload' => json_encode([
+                'temp_file_path' => $path,
+                'selected_sheet' => 0,
+                'mapping'        => $mapping,
+            ]),
+        ])->assertStatus(200);
+
+        return \DB::table('temporary_asset_imports')
+            ->where('user_id', $this->userA->id)->orderBy('id')->get();
+    }
+
+    /**
+     * The reported crash. countDataRows() cast every cell with a bare (string) and
+     * runs BEFORE the import loop, so one date-formatted cell anywhere in the sheet
+     * threw "Object of class DateTimeImmutable could not be converted to string"
+     * and ended the job with zero rows written — the whole file lost, not one cell.
+     *
+     * Note it does not need to be mapped to a string column to do that; mapping it
+     * to Tag is simply the shape that was reported.
+     */
+    public function test_a_date_cell_in_a_string_column_no_longer_kills_the_import(): void
+    {
+        $this->actingAs($this->userA);
+
+        $path = $this->seedXlsx('ca0100', [
+            ['Tag', 'Name'],
+            new \OpenSpout\Common\Entity\Row([$this->dateCell('2024-03-15'), \OpenSpout\Common\Entity\Cell::fromValue('Desk Chair')]),
+            ['A-2', 'Big Table'],
+            ['A-3', 'Lamp'],
+        ]);
+
+        $rows = $this->importFile($path, [
+            'tag'  => ['columns' => ['Tag'], 'separator' => ' '],
+            'name' => ['columns' => ['Name'], 'separator' => ' '],
+        ]);
+
+        // The whole file survived, not just the rows after the offending one.
+        $this->assertCount(3, $rows);
+        $this->assertSame(['Desk Chair', 'Big Table', 'Lamp'], $rows->pluck('name')->all());
+
+        // And the date became a sensible string rather than a crash or a serial.
+        $this->assertSame('2024-03-15', $rows->first()->tag);
+
+        $this->assertSame('completed', Cache::get('import_progress_'.$this->userA->id)['status']);
+    }
+
+    /**
+     * The other object type OpenSpout can return. It got past countDataRows()'s
+     * cast only to die in processFile(), which guarded DateTimeInterface but not
+     * this.
+     */
+    public function test_a_duration_cell_no_longer_kills_the_import(): void
+    {
+        $this->actingAs($this->userA);
+
+        $path = $this->seedXlsx('ca0101', [
+            ['Tag', 'Name'],
+            new \OpenSpout\Common\Entity\Row([$this->durationCell('PT3H30M'), \OpenSpout\Common\Entity\Cell::fromValue('Desk Chair')]),
+            ['A-2', 'Big Table'],
+        ]);
+
+        $rows = $this->importFile($path, [
+            'tag'  => ['columns' => ['Tag'], 'separator' => ' '],
+            'name' => ['columns' => ['Name'], 'separator' => ' '],
+        ]);
+
+        $this->assertCount(2, $rows);
+        $this->assertSame('03:30:00', $rows->first()->tag);
+        $this->assertSame('completed', Cache::get('import_progress_'.$this->userA->id)['status']);
+    }
+
+    /**
+     * A date cell with NO date number format reads back as its raw Excel serial.
+     * That never threw, which is why it went unnoticed — it just turned dates into
+     * meaningless integers.
+     */
+    public function test_a_bare_excel_serial_in_a_date_column_becomes_a_real_date(): void
+    {
+        $this->actingAs($this->userA);
+
+        $path = $this->seedXlsx('ca0102', [
+            ['Tag', 'Name', 'Purchase Date'],
+            // Written unformatted on purpose: this is exactly how the reader hands
+            // back a date column whose formatting was stripped.
+            ['A-1', 'Desk Chair', new \DateTimeImmutable('2024-03-15')],
+        ]);
+
+        $rows = $this->importFile($path, [
+            'tag'           => ['columns' => ['Tag'], 'separator' => ' '],
+            'name'          => ['columns' => ['Name'], 'separator' => ' '],
+            'purchase_date' => ['columns' => ['Purchase Date'], 'separator' => ' '],
+        ]);
+
+        $this->assertSame('2024-03-15', $rows->first()->purchase_date);
+    }
+
+    // ── The coercion rules themselves ────────────────────────────────
+
+    public static function dateShapes(): array
+    {
+        return [
+            'date object'      => [new \DateTimeImmutable('2024-03-15'), '2024-03-15'],
+            'iso string'       => ['2024-03-15', '2024-03-15'],
+            'day first'        => ['15/03/2024', '2024-03-15'],
+            'dotted'           => ['15.03.2024', '2024-03-15'],
+            'excel serial int' => [45366, '2024-03-15'],
+            'excel serial str' => ['45366', '2024-03-15'],
+            'placeholder'      => ['N/A', null],
+            'dash'             => ['-', null],
+            'empty'            => ['', null],
+            'null'             => [null, null],
+            'nonsense'         => ['ABC123', null],
+            // A bare year must stay a year, not be read as a serial.
+            'year'             => ['2024', '2024-01-01'],
+            // Above Excel's own ceiling, so not a date.
+            'out of range'     => [99999999, null],
+        ];
+    }
+
+    /**
+     * @dataProvider dateShapes
+     */
+    public function test_every_date_shape_goes_through_one_parser(mixed $input, ?string $expected): void
+    {
+        $service = new class
+        {
+            use \App\Traits\SanitizesImportDates;
+
+            public function call(mixed $v): ?string
+            {
+                return $this->sanitizeDate($v);
+            }
+        };
+
+        $this->assertSame($expected, $service->call($input));
+    }
+
+    public static function costShapes(): array
+    {
+        return [
+            'plain int'          => [1500, '1500', false],
+            'plain float'        => [1500.75, '1500.75', false],
+            'plain string'       => ['1500', '1500', false],
+            'rupiah'             => ['Rp 1.250.000', '1250000', false],
+            'idr prefix'         => ['IDR 1.250.000', '1250000', false],
+            'english separators' => ['1,250,000.50', '1250000.50', false],
+            'indonesian'         => ['1.250.000,50', '1250000.50', false],
+            'negative'           => ['-1500.25', '-1500.25', false],
+            'empty'              => ['', null, false],
+            'null'               => [null, null, false],
+            'unparseable'        => ['abc', null, true],
+            'symbols only'       => ['???', null, true],
+        ];
+    }
+
+    /**
+     * @dataProvider costShapes
+     */
+    public function test_cost_coercion_handles_real_world_shapes(mixed $input, ?string $expected, bool $expectError): void
+    {
+        $service = new class
+        {
+            use \App\Traits\CoercesImportValues;
+            use \App\Traits\SanitizesImportDates;
+
+            public function call(mixed $v): array
+            {
+                return $this->coerceToDecimal($v);
+            }
+        };
+
+        $result = $service->call($input);
+
+        $this->assertSame($expected, $result['value']);
+        $this->assertSame($expectError, $result['error'] !== null);
+    }
+
+    // ── Per-row visibility ───────────────────────────────────────────
+
+    /**
+     * An unusable value is kept, flagged, and still imported. It must NOT change
+     * is_invalid — that means "missing name or category" and nothing else, and
+     * turning one messy column into a page of blocked rows would be worse than the
+     * silent drop this replaces.
+     */
+    public function test_an_unreadable_value_is_recorded_without_invalidating_the_row(): void
+    {
+        $this->actingAs($this->userA);
+
+        $path = $this->seedCsvFile('ca0103', "Tag,Name,Purchase Date,Purchase Cost\nA-1,Desk Chair,ABC123,abc\nA-2,Big Table,2024-03-15,1500\n");
+
+        $rows = $this->importFile($path, [
+            'tag'           => ['columns' => ['Tag'], 'separator' => ' '],
+            'name'          => ['columns' => ['Name'], 'separator' => ' '],
+            'purchase_date' => ['columns' => ['Purchase Date'], 'separator' => ' '],
+            'purchase_cost' => ['columns' => ['Purchase Cost'], 'separator' => ' '],
+        ]);
+
+        $bad  = $rows->firstWhere('tag', 'A-1');
+        $good = $rows->firstWhere('tag', 'A-2');
+
+        // Raw text kept — the user cannot fix a value they can no longer see.
+        $this->assertSame('ABC123', $bad->purchase_date);
+        $this->assertSame('abc', $bad->purchase_cost);
+
+        $this->assertSame(
+            ['purchase_date' => 'ABC123', 'purchase_cost' => 'abc'],
+            json_decode($bad->_coercion_notes, true)
+        );
+
+        // Still importable, exactly as before this change.
+        $this->assertFalse((bool) $bad->is_invalid);
+
+        // The clean row is untouched and carries no note.
+        $this->assertNull($good->_coercion_notes);
+        $this->assertSame('2024-03-15', $good->purchase_date);
+        $this->assertSame('1500', $good->purchase_cost);
+    }
+
+    public function test_the_review_page_names_the_column_and_the_value_that_failed(): void
+    {
+        $this->actingAs($this->userA);
+
+        $id = \DB::table('temporary_asset_imports')->insertGetId([
+            'user_id' => $this->userA->id, 'property_id' => $this->propertyA->id,
+            'tag' => 'A-1', 'name' => 'Desk Chair', 'category_id' => $this->categoryA->id,
+            'status' => 'in_service', 'is_invalid' => false,
+            'purchase_date' => 'ABC123',
+            '_coercion_notes' => json_encode(['purchase_date' => 'ABC123']),
+            'created_at' => now(), 'updated_at' => now(),
+        ]);
+
+        $this->get(route('assets.import-review'))
+            ->assertStatus(200)
+            ->assertSee('data-coercion-warning="'.$id.'"', false)
+            // Escaped comparison: the copy contains an apostrophe, which Blade emits
+            // as &#039;, and assertSee escapes the expectation the same way.
+            ->assertSee(__('assets.coercion_note_date', ['value' => 'ABC123']))
+            // Amber, not the red invalid treatment — the row is valid.
+            ->assertSee('text-amber-500', false)
+            // The pattern established elsewhere in this feature.
+            ->assertDontSee('cursor-help', false);
+    }
+
+    public function test_fixing_the_cell_clears_its_note(): void
+    {
+        $this->actingAs($this->userA);
+
+        $id = \DB::table('temporary_asset_imports')->insertGetId([
+            'user_id' => $this->userA->id, 'property_id' => $this->propertyA->id,
+            'tag' => 'A-1', 'name' => 'Desk Chair', 'category_id' => $this->categoryA->id,
+            'status' => 'in_service', 'is_invalid' => false,
+            'purchase_date' => 'ABC123', 'purchase_cost' => 'abc',
+            '_coercion_notes' => json_encode(['purchase_date' => 'ABC123', 'purchase_cost' => 'abc']),
+            'created_at' => now(), 'updated_at' => now(),
+        ]);
+
+        $this->postJson(route('assets.import.update-row'), [
+            'row_id' => $id, 'field_name' => 'purchase_date', 'new_value' => '2024-03-15',
+        ])->assertStatus(200);
+
+        // Only the fixed field's note goes; the other one is untouched.
+        $this->assertSame(
+            ['purchase_cost' => 'abc'],
+            json_decode(\DB::table('temporary_asset_imports')->find($id)->_coercion_notes, true)
+        );
+
+        $this->postJson(route('assets.import.update-row'), [
+            'row_id' => $id, 'field_name' => 'purchase_cost', 'new_value' => 'Rp 2.000.000',
+        ])->assertStatus(200);
+
+        $this->assertNull(\DB::table('temporary_asset_imports')->find($id)->_coercion_notes);
+    }
+
+    public function test_a_bad_value_typed_on_the_review_page_is_recorded_too(): void
+    {
+        $this->actingAs($this->userA);
+
+        $id = \DB::table('temporary_asset_imports')->insertGetId([
+            'user_id' => $this->userA->id, 'property_id' => $this->propertyA->id,
+            'tag' => 'A-1', 'name' => 'Desk Chair', 'category_id' => $this->categoryA->id,
+            'status' => 'in_service', 'is_invalid' => false,
+            'created_at' => now(), 'updated_at' => now(),
+        ]);
+
+        // Staging columns are strings, so this never errored — it was accepted and
+        // then silently dropped by storeBatch() at save time.
+        $this->postJson(route('assets.import.update-row'), [
+            'row_id' => $id, 'field_name' => 'purchase_cost', 'new_value' => 'not a number',
+        ])->assertStatus(200)->assertJson(['is_invalid' => false]);
+
+        $row = \DB::table('temporary_asset_imports')->find($id);
+        $this->assertSame(['purchase_cost' => 'not a number'], json_decode($row->_coercion_notes, true));
+        $this->assertSame('not a number', $row->purchase_cost);
+    }
+
+    public function test_bulk_edit_applies_the_same_coercion_rules(): void
+    {
+        $this->actingAs($this->userA);
+        $ids = array_values($this->seedThreeStagingRows());
+
+        $this->postJson(route('assets.import.bulk-update-rows'), [
+            'row_ids' => $ids, 'field_name' => 'purchase_cost', 'new_value' => 'nope',
+        ])->assertStatus(200);
+
+        foreach ($ids as $id) {
+            $this->assertSame(
+                ['purchase_cost' => 'nope'],
+                json_decode(\DB::table('temporary_asset_imports')->find($id)->_coercion_notes, true)
+            );
+        }
+
+        $this->postJson(route('assets.import.bulk-update-rows'), [
+            'row_ids' => $ids, 'field_name' => 'purchase_cost', 'new_value' => '1.250.000',
+        ])->assertStatus(200);
+
+        foreach ($ids as $id) {
+            $this->assertNull(\DB::table('temporary_asset_imports')->find($id)->_coercion_notes);
+        }
+    }
+
+    // ── Job-level detail ─────────────────────────────────────────────
+
+    private function seedFailedImport(string $detail): void
+    {
+        Cache::put('import_progress_'.$this->userA->id, [
+            'status' => 'failed', 'percentage' => 0, 'processed' => 0, 'total' => 0,
+            'error' => '', 'error_code' => \App\Exceptions\ImportFailure::GENERIC,
+            'error_detail' => $detail, 'import_id' => 'abc123',
+        ], 600);
+    }
+
+    public function test_job_error_detail_is_withheld_from_ordinary_users(): void
+    {
+        $this->actingAs($this->userA);
+        $this->seedFailedImport('TypeError: Object of class DateTimeImmutable could not be converted to string');
+
+        $payload = $this->get(route('assets.import-status'))->assertStatus(200)->json();
+
+        // Absent, not blank — there is nothing to find by inspecting the response.
+        $this->assertArrayNotHasKey('error_detail', $payload);
+        // The actionable half is still there.
+        $this->assertSame(__('assets.import_error_generic'), $payload['error']);
+    }
+
+    public function test_job_error_detail_is_released_to_a_super_admin(): void
+    {
+        $superAdmin = User::factory()->create([
+            'is_super_admin' => true, 'property_id' => null, 'department_id' => null,
+        ]);
+
+        Cache::put('import_progress_'.$superAdmin->id, [
+            'status' => 'failed', 'percentage' => 0, 'processed' => 0, 'total' => 0,
+            'error' => '', 'error_code' => \App\Exceptions\ImportFailure::GENERIC,
+            'error_detail' => 'TypeError: could not be converted to string',
+            'import_id' => 'abc123',
+        ], 600);
+
+        $this->actingAs($superAdmin)
+            ->get(route('assets.import-status'))
+            ->assertStatus(200)
+            ->assertJsonPath('error_detail', 'TypeError: could not be converted to string');
+    }
+
+    /**
+     * The earlier parse-failure fix removed raw exception text from the UI because
+     * it leaked absolute server paths. Putting a "Show Details" button in front of
+     * the same string would undo that, so the sanitiser is pinned here.
+     */
+    public function test_the_failure_detail_carries_no_paths_or_stack_trace(): void
+    {
+        $job = new ProcessImportJobDescribeProbe(1, 'temp/import_x.csv', [], 0, 'a');
+
+        $detail = $job->describe(new \RuntimeException(
+            'Could not open '.base_path('storage/app/private/temp/import_abc.xlsx')." for reading\n#0 /var/www/vendor/foo.php(12)"
+        ));
+
+        $this->assertStringStartsWith('RuntimeException:', $detail);
+        $this->assertStringNotContainsString(base_path(), $detail);
+        $this->assertStringNotContainsString('/', $detail);
+        $this->assertStringNotContainsString('#0', $detail);
+        $this->assertStringContainsString('import_abc.xlsx', $detail, 'The filename is the useful part; only the path is not.');
+    }
+
+    public function test_coercion_copy_follows_the_active_locale(): void
+    {
+        foreach (['coercion_row_warning', 'coercion_note_date', 'coercion_note_cost', 'show_error_details'] as $key) {
+            app()->setLocale('en');
+            $en = __('assets.'.$key, ['value' => 'x']);
+            app()->setLocale('id');
+            $this->assertNotEquals($en, __('assets.'.$key, ['value' => 'x']),
+                "Key [{$key}] is not actually translated.");
+        }
+    }
+}
+
+/**
+ * describeFailure() is not part of the job's public surface, but its output is a
+ * security boundary — the one thing standing between a super-admin's "Show Details"
+ * and the server's filesystem layout. That earns a direct test rather than being
+ * exercised only through a real failure, so the method is protected and reached here.
+ */
+class ProcessImportJobDescribeProbe extends \App\Jobs\ProcessImportJob
+{
+    public function describe(\Throwable $e): string
+    {
+        return $this->describeFailure($e);
     }
 }
 
