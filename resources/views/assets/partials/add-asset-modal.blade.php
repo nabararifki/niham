@@ -94,7 +94,11 @@
                                      <div class="flex items-center gap-1.5 mb-2">
                                          <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">{{ __('assets.upload_prompt') }}</label>
                                          <span tabindex="0"
-                                               class="relative inline-flex items-center cursor-help focus:outline-none"
+                                               {{-- No cursor-help: the question-mark cursor reads as
+                                                    "this page is broken" more often than "hover me".
+                                                    The icon's colour change is the hover affordance,
+                                                    consistently across the whole Smart Import flow. --}}
+                                               class="relative inline-flex items-center focus:outline-none"
                                                x-data="{ tip: false, tx: 0, ty: 0 }"
                                                @mouseenter="tip = true; tx = $event.clientX; ty = $event.clientY"
                                                @mousemove="tx = $event.clientX; ty = $event.clientY"

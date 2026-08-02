@@ -591,26 +591,20 @@ class AssetImportController extends Controller
         $createdCategories  = [];
         $createdDepartments = [];
 
+        // Names go in exactly as the file spelled them: the hint write-back below
+        // matches on LOWER(_category_hint), and the review page shows the user the
+        // same text they saw on the mapping page. quickAddEntity() upper-cases
+        // instead, matching CategoryController — hence the helper staying neutral.
         if ($request->filled('categories') && auth()->user()->can('create', Category::class)) {
             foreach ($request->categories as $name) {
-                $code     = $codeGen->generateUniqueCode($name, Category::class, $propertyId);
-                $category = Category::create([
-                    'name'        => $name,
-                    'code'        => $code,
-                    'property_id' => $propertyId,
-                ]);
+                $category = $this->createEntityForProperty(Category::class, $name, $propertyId, $codeGen);
                 $createdCategories[$name] = $category->id;
             }
         }
 
         if ($request->filled('departments') && auth()->user()->can('create', Department::class)) {
             foreach ($request->departments as $name) {
-                $code       = $codeGen->generateUniqueCode($name, Department::class, $propertyId);
-                $department = Department::create([
-                    'name'        => $name,
-                    'code'        => $code,
-                    'property_id' => $propertyId,
-                ]);
+                $department = $this->createEntityForProperty(Department::class, $name, $propertyId, $codeGen);
                 $createdDepartments[$name] = $department->id;
             }
         }
@@ -642,6 +636,116 @@ class AssetImportController extends Controller
             ]);
 
         return redirect()->route('assets.import-review');
+    }
+
+    /**
+     * Create a Category or Department for a property, generating its code if none was given.
+     *
+     * The single place inside the import flow that writes one of these entities —
+     * Rapid-Add and the review page's quick-add both come through here, so the two
+     * cannot drift into producing differently-shaped rows.
+     *
+     * $name is written verbatim. Casing is the caller's decision because the two
+     * callers legitimately disagree: Rapid-Add must preserve the file's spelling to
+     * match its hint columns, quick-add upper-cases like CategoryController does.
+     *
+     * @param  class-string<Category|Department>  $modelClass
+     */
+    private function createEntityForProperty(
+        string $modelClass,
+        string $name,
+        int $propertyId,
+        EntityCodeGeneratorService $codeGen,
+        ?string $code = null,
+        ?string $notes = null,
+        bool $executiveOversight = false
+    ) {
+        $attributes = [
+            'name'        => $name,
+            'code'        => filled($code) ? $code : $codeGen->generateUniqueCode($name, $modelClass, $propertyId),
+            // Set explicitly rather than leaning on BelongsToProperty's creating
+            // hook: a super-admin's property comes from the session, and this
+            // controller has already resolved it.
+            'property_id' => $propertyId,
+        ];
+
+        if (filled($notes)) {
+            $attributes['notes'] = $notes;
+        }
+
+        // Category has no such column, and it is not fillable there either.
+        if ($modelClass === Department::class) {
+            $attributes['is_executive_oversight'] = $executiveOversight;
+        }
+
+        return $modelClass::create($attributes);
+    }
+
+    /**
+     * AJAX: Create a Category or Department from the review page without leaving it.
+     *
+     * A row can only point at an entity that already exists, so an import naming one
+     * nobody created yet used to mean abandoning the review — losing pagination,
+     * selection and unsaved edits — to go make it elsewhere.
+     *
+     * Deliberately not a re-implementation of CategoryController::store(): the same
+     * policy gates it, the same rules validate it, and the same uppercase transform
+     * applies. The one intentional difference is that code may be left blank, in
+     * which case EntityCodeGeneratorService fills it in — exactly what Rapid-Add
+     * already does for entities it creates on the user's behalf.
+     */
+    public function quickAddEntity(Request $request, EntityCodeGeneratorService $codeGen)
+    {
+        $data = $request->validate([
+            'entity_type'            => 'required|in:category,department',
+            'name'                   => 'required|string|max:255',
+            'code'                   => 'nullable|string|max:255',
+            'notes'                  => 'nullable|string|max:255',
+            'is_executive_oversight' => 'nullable|boolean',
+        ]);
+
+        $modelClass = $data['entity_type'] === 'category' ? Category::class : Department::class;
+
+        // The same policy the create forms authorize against — CategoryPolicy /
+        // DepartmentPolicy, resolving to hasPermission('perm_categories', 'create').
+        // Throws 403 rather than returning JSON so the gate can't be forgotten here
+        // and enforced elsewhere.
+        $this->authorize('create', $modelClass);
+
+        $propertyId = auth()->user()->isSuperAdmin()
+            ? session('active_property_id')
+            : auth()->user()->property_id;
+
+        if (!$propertyId) {
+            return response()->json([
+                'success' => false,
+                'message' => __('assets.import_parse_error', ['message' => 'No active property selected.']),
+            ], 422);
+        }
+
+        $entity = $this->createEntityForProperty(
+            $modelClass,
+            strtoupper($data['name']),
+            (int) $propertyId,
+            $codeGen,
+            filled($data['code'] ?? null) ? strtoupper($data['code']) : null,
+            $data['notes'] ?? null,
+            // Ignored outright for a category: the helper only forwards it for
+            // departments, so a request that carries it there changes nothing.
+            $request->boolean('is_executive_oversight')
+        );
+
+        return response()->json([
+            'success' => true,
+            'entity'  => [
+                // The integer PK the review page's <option value> uses. The uuid
+                // from HasUuids is only the route key and is not what selects hold.
+                'id'   => $entity->id,
+                'name' => $entity->name,
+                'code' => $entity->code,
+                'type' => $data['entity_type'],
+            ],
+        ]);
     }
 
     /**

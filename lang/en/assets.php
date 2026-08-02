@@ -156,6 +156,11 @@ return [
     'bulk_update_error'                 => 'Failed to update the selected rows: :message',
     'delete_rows_error'                 => 'Failed to delete the selected rows: :message',
     'selection_page_scoped'             => 'Selection applies to this page only.',
+    // Quick Add category/department from the review page
+    'quick_add_category'                => 'Add a new category',
+    'quick_add_department'              => 'Add a new department',
+    'quick_add_code_hint'               => 'Leave blank to generate one automatically.',
+    'quick_add_error'                   => 'Failed to create: :message',
 ];
 
 

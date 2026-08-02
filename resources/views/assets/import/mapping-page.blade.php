@@ -160,7 +160,9 @@
                                      which a JS-driven tooltip would need extra wiring for. Opens
                                      downward so it is never clipped by an ancestor's overflow. --}}
                                 <template x-if="field.id === 'status'">
-                                    <span tabindex="0" class="relative inline-flex items-center group cursor-help focus:outline-none">
+                                    {{-- No cursor-help — see add-asset-modal. The icon going
+                                         accent on hover/focus is the affordance. --}}
+                                    <span tabindex="0" class="relative inline-flex items-center group focus:outline-none">
                                         <svg class="w-3.5 h-3.5 text-gray-400 group-hover:text-accent group-focus:text-accent transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
                                         </svg>
@@ -268,7 +270,7 @@
                                     <template x-for="field in dbFields" :key="field.id">
                                         <td class="px-4 py-2 text-gray-700 dark:text-gray-200 whitespace-nowrap overflow-hidden text-ellipsis max-w-[250px]">
                                             <template x-if="field.id === 'department' && !isExecutive">
-                                                <div class="inline-flex items-center gap-1.5 text-amber-600 dark:text-amber-400 font-semibold bg-amber-50 dark:bg-amber-950/30 px-2.5 py-1 rounded-lg border border-amber-200/50 dark:border-amber-900/50 text-xs shadow-sm cursor-help"
+                                                <div class="inline-flex items-center gap-1.5 text-amber-600 dark:text-amber-400 font-semibold bg-amber-50 dark:bg-amber-950/30 px-2.5 py-1 rounded-lg border border-amber-200/50 dark:border-amber-900/50 text-xs shadow-sm"
                                                      title="{{ __('assets.auto_assigned_department_warning') ?? 'Locked to your department by policy' }}">
                                                     <svg class="w-3.5 h-3.5 opacity-80" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path>

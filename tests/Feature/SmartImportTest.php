@@ -10,6 +10,7 @@ use App\Models\Property;
 use App\Models\Role;
 use App\Models\User;
 use App\Services\AssetImportService;
+use App\Services\EntityCodeGeneratorService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Cache;
@@ -2281,6 +2282,407 @@ class SmartImportTest extends TestCase
             $en = __('assets.'.$key);
             app()->setLocale('id');
             $this->assertNotEquals($en, __('assets.'.$key), "Key [{$key}] is not actually translated.");
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // 12. QUICK ADD CATEGORY / DEPARTMENT FROM THE REVIEW PAGE
+    // ══════════════════════════════════════════════════════════════
+
+    /**
+     * Grant userA a permission string on the RBAC module that gates this entity.
+     *
+     * Set through the real column the policy reads rather than by mocking Gate:
+     * the whole point of these tests is that quick-add goes through the same
+     * hasPermission() matrix the create forms do, including its non-obvious
+     * compound values ('create & update' grants create, 'update' does not).
+     */
+    private function grantPermission(string $module, string $permission): void
+    {
+        $this->userA->role->update([$module => $permission]);
+        $this->userA->refresh()->load('role');
+    }
+
+    private function quickAdd(array $payload)
+    {
+        return $this->postJson(route('assets.import.quick-add-entity'), $payload);
+    }
+
+    public function test_quick_add_is_refused_without_the_create_permission(): void
+    {
+        $this->actingAs($this->userA);
+
+        // RoleFactory defaults every perm_* to 'no access', so this is the
+        // out-of-the-box state, not a contrived one.
+        $this->quickAdd(['entity_type' => 'category', 'name' => 'Furniture'])
+            ->assertStatus(403);
+        $this->quickAdd(['entity_type' => 'department', 'name' => 'Housekeeping'])
+            ->assertStatus(403);
+
+        $this->assertDatabaseMissing('categories', ['name' => 'FURNITURE']);
+        $this->assertDatabaseMissing('departments', ['name' => 'HOUSEKEEPING']);
+    }
+
+    /**
+     * Each permission string is exercised against the real policy, so a shortcut
+     * like `$perm === 'create'` in the controller would fail here rather than
+     * silently locking out everyone on a compound permission.
+     */
+    public function test_quick_add_honours_every_permission_string_that_grants_create(): void
+    {
+        $this->actingAs($this->userA);
+
+        foreach (['full access', 'create', 'create & update', 'create & delete'] as $i => $permission) {
+            $this->grantPermission('perm_categories', $permission);
+            $this->quickAdd(['entity_type' => 'category', 'name' => 'Allowed '.$i])
+                ->assertStatus(200);
+        }
+
+        foreach (['no access', 'update', 'delete', 'update & delete'] as $i => $permission) {
+            $this->grantPermission('perm_categories', $permission);
+            $this->quickAdd(['entity_type' => 'category', 'name' => 'Refused '.$i])
+                ->assertStatus(403);
+        }
+
+        $this->assertSame(4, Category::where('property_id', $this->propertyA->id)
+            ->where('name', 'like', 'ALLOWED%')->count());
+        $this->assertSame(0, Category::where('property_id', $this->propertyA->id)
+            ->where('name', 'like', 'REFUSED%')->count());
+    }
+
+    /**
+     * Category and Department are gated by separate RBAC modules — holding one
+     * must not imply the other.
+     */
+    public function test_category_and_department_permissions_are_independent(): void
+    {
+        $this->actingAs($this->userA);
+        $this->grantPermission('perm_categories', 'full access');
+
+        $this->quickAdd(['entity_type' => 'category', 'name' => 'Linens'])->assertStatus(200);
+        $this->quickAdd(['entity_type' => 'department', 'name' => 'Linens'])->assertStatus(403);
+    }
+
+    /**
+     * The generated code must be byte-identical to what the Categories screen
+     * would produce, so it is compared against the service itself rather than a
+     * hardcoded string that could drift from the generator.
+     */
+    public function test_a_blank_code_is_generated_by_the_same_service_the_rest_of_the_app_uses(): void
+    {
+        $this->actingAs($this->userA);
+        $this->grantPermission('perm_categories', 'full access');
+
+        $expected = app(EntityCodeGeneratorService::class)
+            ->generateUniqueCode('WORKSTATIONS', Category::class, $this->propertyA->id);
+
+        $this->quickAdd(['entity_type' => 'category', 'name' => 'Workstations', 'code' => ''])
+            ->assertStatus(200)
+            ->assertJsonPath('entity.code', $expected);
+
+        $this->assertDatabaseHas('categories', [
+            'property_id' => $this->propertyA->id,
+            'name'        => 'WORKSTATIONS',
+            'code'        => $expected,
+        ]);
+    }
+
+    /**
+     * The happy path only exercises the generator's first branch. Two names
+     * sharing a 3-char prefix force it into its collision fallbacks, which is
+     * where a re-implementation would most plausibly disagree.
+     */
+    public function test_generated_codes_stay_unique_when_names_share_a_prefix(): void
+    {
+        $this->actingAs($this->userA);
+        $this->grantPermission('perm_categories', 'full access');
+
+        $codes = [];
+        foreach (['Cabling', 'Cabinets', 'Cabins'] as $name) {
+            $response = $this->quickAdd(['entity_type' => 'category', 'name' => $name])
+                ->assertStatus(200);
+            $codes[] = $response->json('entity.code');
+        }
+
+        $this->assertCount(3, array_unique($codes), 'Generated codes collided: '.implode(', ', $codes));
+    }
+
+    public function test_a_supplied_code_is_kept_and_both_fields_are_upper_cased(): void
+    {
+        $this->actingAs($this->userA);
+        $this->grantPermission('perm_departments', 'full access');
+
+        $this->quickAdd([
+            'entity_type' => 'department',
+            'name'        => 'front office',
+            'code'        => 'fo',
+        ])->assertStatus(200);
+
+        // Matches CategoryController/DepartmentController::store, which upper-case
+        // both fields before persisting.
+        $this->assertDatabaseHas('departments', [
+            'property_id' => $this->propertyA->id,
+            'name'        => 'FRONT OFFICE',
+            'code'        => 'FO',
+        ]);
+    }
+
+    public function test_notes_are_stored_when_given(): void
+    {
+        $this->actingAs($this->userA);
+        $this->grantPermission('perm_categories', 'full access');
+
+        $this->quickAdd([
+            'entity_type' => 'category',
+            'name'        => 'Vehicles',
+            'notes'       => 'Fleet only',
+        ])->assertStatus(200);
+
+        $this->assertDatabaseHas('categories', ['name' => 'VEHICLES', 'notes' => 'Fleet only']);
+    }
+
+    /**
+     * The flag has to reach the column hasExecutiveOversight() actually reads,
+     * not just be accepted by validation.
+     */
+    public function test_executive_oversight_applies_to_a_department(): void
+    {
+        $this->actingAs($this->userA);
+        $this->grantPermission('perm_departments', 'full access');
+
+        $this->quickAdd([
+            'entity_type'            => 'department',
+            'name'                   => 'Executive',
+            'is_executive_oversight' => true,
+        ])->assertStatus(200);
+
+        $this->quickAdd([
+            'entity_type' => 'department',
+            'name'        => 'Laundry',
+        ])->assertStatus(200);
+
+        $executive = Department::where('name', 'EXECUTIVE')->firstOrFail();
+        $laundry   = Department::where('name', 'LAUNDRY')->firstOrFail();
+
+        $this->assertTrue((bool) $executive->is_executive_oversight);
+        $this->assertFalse((bool) $laundry->is_executive_oversight);
+
+        $member = User::factory()->create([
+            'property_id'   => $this->propertyA->id,
+            'role_id'       => $this->userA->role_id,
+            'department_id' => $executive->id,
+        ]);
+        $this->assertTrue($member->hasExecutiveOversight());
+    }
+
+    /**
+     * Categories have no such column. The request must not error, and must not
+     * smuggle the attribute through — a mass-assignment change on Category would
+     * otherwise turn this into a silent write.
+     */
+    public function test_executive_oversight_is_ignored_for_a_category(): void
+    {
+        $this->actingAs($this->userA);
+        $this->grantPermission('perm_categories', 'full access');
+
+        $this->quickAdd([
+            'entity_type'            => 'category',
+            'name'                   => 'Appliances',
+            'is_executive_oversight' => true,
+        ])->assertStatus(200);
+
+        $category = Category::where('name', 'APPLIANCES')->firstOrFail();
+        $this->assertArrayNotHasKey('is_executive_oversight', $category->getAttributes());
+    }
+
+    /**
+     * Same rules as CategoryController::store, with the single deliberate
+     * exception that code may be blank (it is generated instead).
+     */
+    public function test_validation_matches_the_existing_creation_path(): void
+    {
+        $this->actingAs($this->userA);
+        $this->grantPermission('perm_categories', 'full access');
+
+        $this->quickAdd(['entity_type' => 'category'])
+            ->assertStatus(422)->assertJsonValidationErrors('name');
+
+        $this->quickAdd(['entity_type' => 'category', 'name' => str_repeat('a', 256)])
+            ->assertStatus(422)->assertJsonValidationErrors('name');
+
+        $this->quickAdd(['entity_type' => 'category', 'name' => 'Ok', 'code' => str_repeat('a', 256)])
+            ->assertStatus(422)->assertJsonValidationErrors('code');
+
+        $this->quickAdd(['entity_type' => 'category', 'name' => 'Ok', 'notes' => str_repeat('a', 256)])
+            ->assertStatus(422)->assertJsonValidationErrors('notes');
+
+        $this->quickAdd(['entity_type' => 'location', 'name' => 'Ok'])
+            ->assertStatus(422)->assertJsonValidationErrors('entity_type');
+
+        $this->assertSame(1, Category::where('property_id', $this->propertyA->id)->count(),
+            'Only the setUp fixture should exist — no invalid request wrote a row.');
+    }
+
+    public function test_quick_add_entities_belong_to_the_callers_property(): void
+    {
+        $this->actingAs($this->userA);
+        $this->grantPermission('perm_categories', 'full access');
+
+        $this->quickAdd(['entity_type' => 'category', 'name' => 'Signage'])->assertStatus(200);
+
+        $created = Category::withoutGlobalScopes()->where('name', 'SIGNAGE')->firstOrFail();
+        $this->assertSame($this->propertyA->id, $created->property_id);
+
+        // And it must not leak into the other tenant's review page.
+        $this->actingAs($this->userB);
+        $this->assertSame(0, Category::where('property_id', $this->propertyB->id)
+            ->where('name', 'SIGNAGE')->count());
+    }
+
+    /**
+     * A super-admin has no property_id of their own; every other creation path in
+     * the app reads session('active_property_id') instead, and so must this one.
+     */
+    public function test_super_admin_creates_against_the_active_session_property(): void
+    {
+        $superAdmin = User::factory()->create([
+            'is_super_admin' => true,
+            'property_id'    => null,
+            'department_id'  => null,
+        ]);
+
+        $this->actingAs($superAdmin)
+            ->withSession(['active_property_id' => $this->propertyB->id]);
+
+        $this->quickAdd(['entity_type' => 'category', 'name' => 'Global'])->assertStatus(200);
+
+        $created = Category::withoutGlobalScopes()->where('name', 'GLOBAL')->firstOrFail();
+        $this->assertSame($this->propertyB->id, $created->property_id);
+    }
+
+    public function test_super_admin_without_an_active_property_is_refused(): void
+    {
+        $superAdmin = User::factory()->create([
+            'is_super_admin' => true,
+            'property_id'    => null,
+            'department_id'  => null,
+        ]);
+
+        $this->actingAs($superAdmin);
+        $this->quickAdd(['entity_type' => 'category', 'name' => 'Orphan'])->assertStatus(422);
+
+        $this->assertSame(0, Category::withoutGlobalScopes()->where('name', 'ORPHAN')->count());
+    }
+
+    // ── Review page rendering ────────────────────────────────────────
+
+    public function test_the_quick_add_trigger_is_absent_without_the_permission(): void
+    {
+        $this->actingAs($this->userA);
+        $this->seedThreeStagingRows();
+
+        $html = $this->get(route('assets.import-review'))->assertStatus(200)->getContent();
+
+        // Absent from the DOM entirely, not merely disabled.
+        $this->assertStringNotContainsString('data-quick-add="category"', $html);
+        $this->assertStringNotContainsString('data-quick-add="department"', $html);
+        $this->assertStringNotContainsString(__('assets.quick_add_category'), $html);
+    }
+
+    public function test_the_quick_add_trigger_renders_per_entity_permission(): void
+    {
+        $this->actingAs($this->userA);
+        $this->seedThreeStagingRows();
+        $this->grantPermission('perm_categories', 'create');
+
+        $html = $this->get(route('assets.import-review'))->assertStatus(200)->getContent();
+
+        $this->assertStringContainsString('data-quick-add="category"', $html);
+        $this->assertStringContainsString(__('assets.quick_add_category'), $html);
+
+        // perm_departments is still 'no access' — one permission must not imply the other.
+        $this->assertStringNotContainsString('data-quick-add="department"', $html);
+    }
+
+    /**
+     * The new option has to land in the per-row select AND the bulk-edit header
+     * select. They are separate markup, so a fix to one that misses the other
+     * would leave bulk edit unable to reach the entity that was just created.
+     */
+    public function test_a_new_entity_is_selectable_in_both_the_row_and_bulk_dropdowns(): void
+    {
+        $this->actingAs($this->userA);
+        $this->seedThreeStagingRows();
+        $this->grantPermission('perm_categories', 'full access');
+
+        $this->quickAdd(['entity_type' => 'category', 'name' => 'Zippers'])->assertStatus(200);
+        $created = Category::where('name', 'ZIPPERS')->firstOrFail();
+
+        $html = $this->get(route('assets.import-review'))->assertStatus(200)->getContent();
+
+        // Both select flavours carry the marker the frontend injects options into,
+        // and both are server-rendered with the new entity after a reload.
+        $this->assertGreaterThanOrEqual(
+            2,
+            substr_count($html, 'data-entity-select="category"'),
+            'Expected the bulk header select plus at least one row select.'
+        );
+        $this->assertSame(
+            4,
+            substr_count($html, 'value="'.$created->id.'"'),
+            'Expected the new option in the bulk header select and in all three row selects.'
+        );
+    }
+
+    /**
+     * Applies to the whole Smart Import flow, not just the new icon: a
+     * question-mark cursor reads as a broken page, so hover colour is the only
+     * affordance these triggers use.
+     */
+    public function test_no_smart_import_screen_uses_a_help_cursor(): void
+    {
+        $this->actingAs($this->userA);
+        $this->grantPermission('perm_assets', 'full access');
+        $this->grantPermission('perm_categories', 'full access');
+        $this->seedThreeStagingRows();
+        $this->seedBannerFile('cu0001');
+
+        $screens = [
+            route('assets.index'),          // renders add-asset-modal (upload help icon)
+            route('assets.import-mapping'), // status help icon + department "Fixed" badge
+            route('assets.import-review'),  // the new quick-add triggers
+        ];
+
+        foreach ($screens as $url) {
+            $html = $this->get($url)->assertStatus(200)->getContent();
+            $this->assertStringNotContainsString('cursor-help', $html, "cursor-help still present on {$url}");
+        }
+    }
+
+    public function test_quick_add_copy_follows_the_active_locale(): void
+    {
+        $this->actingAs($this->userA);
+        $this->seedThreeStagingRows();
+        $this->grantPermission('perm_categories', 'full access');
+        $this->grantPermission('perm_departments', 'full access');
+
+        foreach (['en', 'id'] as $locale) {
+            app()->setLocale($locale);
+            $this->get(route('assets.import-review'))
+                ->assertStatus(200)
+                ->assertSee(__('assets.quick_add_category'), false)
+                ->assertSee(__('assets.quick_add_department'), false)
+                ->assertSee(__('assets.quick_add_code_hint'), false)
+                ->assertSee(__('messages.add_new_category'), false)
+                ->assertSee(__('messages.executive_oversight'), false);
+        }
+
+        foreach (['quick_add_category', 'quick_add_department', 'quick_add_code_hint', 'quick_add_error'] as $key) {
+            app()->setLocale('en');
+            $en = __('assets.'.$key, ['message' => 'x']);
+            app()->setLocale('id');
+            $this->assertNotEquals($en, __('assets.'.$key, ['message' => 'x']),
+                "Key [{$key}] is not actually translated.");
         }
     }
 }

@@ -156,6 +156,11 @@ return [
     'bulk_update_error'                 => 'Gagal memperbarui baris terpilih: :message',
     'delete_rows_error'                 => 'Gagal menghapus baris terpilih: :message',
     'selection_page_scoped'             => 'Pilihan hanya berlaku untuk halaman ini.',
+    // Tambah cepat kategori/departemen dari halaman tinjau
+    'quick_add_category'                => 'Tambah kategori baru',
+    'quick_add_department'              => 'Tambah departemen baru',
+    'quick_add_code_hint'               => 'Kosongkan untuk dibuat otomatis.',
+    'quick_add_error'                   => 'Gagal membuat: :message',
 ];
 
 
