@@ -2605,11 +2605,54 @@ class SmartImportTest extends TestCase
     }
 
     /**
-     * The new option has to land in the per-row select AND the bulk-edit header
-     * select. They are separate markup, so a fix to one that misses the other
-     * would leave bulk edit unable to reach the entity that was just created.
+     * The two kinds of select are updated by different mechanisms and each has its
+     * own way of going wrong, so both are pinned here.
+     *
+     * The bulk-edit header select sits inside <template x-if="selectionCount > 0">.
+     * Alpine rebuilds an x-if body from the pristine template every time the
+     * condition flips, and when nothing is selected the select is not in the document
+     * at all — so appending an <option> to it, as the row selects are updated, was
+     * silently lost. Its options must come from component state instead.
      */
-    public function test_a_new_entity_is_selectable_in_both_the_row_and_bulk_dropdowns(): void
+    public function test_the_bulk_header_select_renders_from_state_rather_than_blade(): void
+    {
+        $this->actingAs($this->userA);
+        $this->seedThreeStagingRows();
+
+        $html = $this->get(route('assets.import-review'))->assertStatus(200)->getContent();
+
+        // Driven by the array quick-add pushes into...
+        $this->assertStringContainsString('x-for="option in categories"', $html);
+        $this->assertStringContainsString('x-for="option in departments"', $html);
+
+        // ...and seeded with what the server knows, so the first render is complete.
+        $this->assertSame(
+            [['id' => $this->categoryA->id, 'name' => $this->categoryA->name]],
+            $this->alpineConfigValue($html, 'categories')
+        );
+    }
+
+    /**
+     * Pull one key out of the importReview() config in the rendered page.
+     *
+     * @js compiles to JSON.parse('...') with every quote written as ", so the
+     * payload has to be unescaped before it is JSON again.
+     */
+    private function alpineConfigValue(string $html, string $key): array
+    {
+        preg_match('/'.preg_quote($key, '/').':\s*JSON\.parse\(\'(.*?)\'\)/s', $html, $matches);
+        $this->assertNotEmpty($matches, "The [{$key}] payload is missing from the component config.");
+
+        $json = preg_replace_callback(
+            '/\\\\u([0-9a-fA-F]{4})/',
+            fn ($m) => mb_chr(hexdec($m[1])),
+            $matches[1]
+        );
+
+        return json_decode($json, true) ?? [];
+    }
+
+    public function test_a_new_entity_reaches_both_the_row_selects_and_the_header_payload(): void
     {
         $this->actingAs($this->userA);
         $this->seedThreeStagingRows();
@@ -2620,18 +2663,20 @@ class SmartImportTest extends TestCase
 
         $html = $this->get(route('assets.import-review'))->assertStatus(200)->getContent();
 
-        // Both select flavours carry the marker the frontend injects options into,
-        // and both are server-rendered with the new entity after a reload.
-        $this->assertGreaterThanOrEqual(
-            2,
-            substr_count($html, 'data-entity-select="category"'),
-            'Expected the bulk header select plus at least one row select.'
-        );
+        // Per-row selects: plain markup, always present, updated in place by id.
         $this->assertSame(
-            4,
-            substr_count($html, 'value="'.$created->id.'"'),
-            'Expected the new option in the bulk header select and in all three row selects.'
+            3,
+            substr_count($html, 'data-entity-select="category"'),
+            'Expected one marker per staging row and none on the header select.'
         );
+        $this->assertSame(3, substr_count($html, 'value="'.$created->id.'"'));
+
+        // Header select: fed from the component config, which must carry it too.
+        $names = array_column($this->alpineConfigValue($html, 'categories'), 'name');
+
+        $this->assertContains('ZIPPERS', $names);
+        $this->assertSame($names, collect($names)->sort()->values()->all(),
+            'The payload must stay name-ordered, matching what review() queries.');
     }
 
     /**

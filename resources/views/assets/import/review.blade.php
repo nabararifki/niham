@@ -31,13 +31,25 @@
         // review paginates server-side at 50/page, and letting a selection span
         // pages the user can't see is worse than making them re-select.
         $pageRowIds = collect($paginatedData->items())->pluck('id')->map(fn ($id) => (int) $id)->values();
+
+        // The bulk-edit header selects render from Alpine state, not from Blade.
+        // They live inside <template x-if="selectionCount > 0">, and Alpine re-clones
+        // an x-if body from the pristine template every time the condition flips —
+        // so an <option> appended to the live DOM is discarded the next time the
+        // selection is cleared and remade, and when nothing is selected the <select>
+        // is not in the document to append to at all. Driving them from an array
+        // quick-add can push into is the only thing that survives both.
+        $entityOptions = [
+            'category'   => $categories->map(fn ($c) => ['id' => (int) $c->id, 'name' => $c->name])->values(),
+            'department' => $departments->map(fn ($d) => ['id' => (int) $d->id, 'name' => $d->name])->values(),
+        ];
     @endphp
 
     {{-- @js, not @json: these happen to be integers today, but @json emits literal
          double quotes for any string value, which would terminate this attribute. --}}
     <div class="py-8"
          @keydown.escape.window="onEscape()"
-         x-data="importReview({ validCount: @js($validCount), invalidCount: @js($invalidCount), invalidPages: @js($invalidPages), total: @js($total), pageRowIds: @js($pageRowIds) })">
+         x-data="importReview({ validCount: @js($validCount), invalidCount: @js($invalidCount), invalidPages: @js($invalidPages), total: @js($total), pageRowIds: @js($pageRowIds), categories: @js($entityOptions['category']), departments: @js($entityOptions['department']) })">
         <div class="max-w-7xl mx-auto sm:px-6 lg:px-8 space-y-6">
 
             {{-- ─── Progress Stepper (Top) ─────────────────────────────────────── --}}
@@ -199,14 +211,15 @@
                                                     'tooltipText' => __('assets.quick_add_category'),
                                                 ])
                                             </div>
+                                            {{-- Options come from Alpine state, not Blade — see the
+                                                 $entityOptions note at the top of this file. --}}
                                             <template x-if="selectionCount > 0">
                                                 <select @change="bulkUpdate('category_id', $event.target.value)"
-                                                        data-entity-select="category"
                                                         class="{{ $bulkInput }} w-36">
                                                     <option value="">{{ __('assets.select_placeholder') }}</option>
-                                                    @foreach($categories as $cat)
-                                                        <option value="{{ $cat->id }}">{{ $cat->name }}</option>
-                                                    @endforeach
+                                                    <template x-for="option in categories" :key="option.id">
+                                                        <option :value="option.id" x-text="option.name"></option>
+                                                    </template>
                                                 </select>
                                             </template>
                                         </th>
@@ -223,12 +236,11 @@
                                             </div>
                                             <template x-if="selectionCount > 0">
                                                 <select @change="bulkUpdate('department_id', $event.target.value)"
-                                                        data-entity-select="department"
                                                         class="{{ $bulkInput }} w-36">
                                                     <option value="">{{ __('assets.select_placeholder') }}</option>
-                                                    @foreach($departments as $dept)
-                                                        <option value="{{ $dept->id }}">{{ $dept->name }}</option>
-                                                    @endforeach
+                                                    <template x-for="option in departments" :key="option.id">
+                                                        <option :value="option.id" x-text="option.name"></option>
+                                                    </template>
                                                 </select>
                                             </template>
                                         </th>
@@ -740,6 +752,11 @@
                 invalidPages: config.invalidPages || [],
                 totalRows: config.total || 0,
                 pageRowIds: config.pageRowIds || [],
+                // Backing store for the bulk-edit header selects. Reactive because
+                // those selects sit inside an x-if and get re-cloned from their
+                // template whenever the selection starts and stops.
+                categories: config.categories || [],
+                departments: config.departments || [],
                 selectedIds: [],
                 menuOpen: false,
                 menuX: 0,
@@ -917,15 +934,28 @@
                     }
                 },
 
-                // Splice the new option into every select that lists this entity —
-                // each row's own select AND the bulk-edit header one, both tagged with
-                // data-entity-select. A reload would be simpler but would cost the user
-                // their page, selection and any in-flight edits, which is the whole
-                // reason this modal exists.
+                // Make the new entity selectable everywhere it belongs, without a
+                // reload — a reload would cost the user their page, selection and any
+                // in-flight edits, which is the whole reason this modal exists.
+                //
+                // Two mechanisms, because the two kinds of select differ:
+                //
+                //  - the bulk-edit header select is inside x-if, so Alpine throws its
+                //    DOM away and rebuilds it from the template each time a selection
+                //    starts. Only pushing into the reactive array survives that, and
+                //    when nothing is selected the select does not exist to touch.
+                //  - the per-row selects are plain server-rendered markup that is
+                //    always present, so they are updated in place. Rebuilding them
+                //    from state would mean re-deriving 50 rows' current values.
                 addEntityOption(entity) {
+                    const list = entity.type === 'department' ? this.departments : this.categories;
+
+                    // The server orders by name; insert in place rather than appending
+                    // so the list does not drift out of order mid-session.
+                    const at = list.findIndex((option) => option.name.localeCompare(entity.name) > 0);
+                    list.splice(at === -1 ? list.length : at, 0, { id: entity.id, name: entity.name });
+
                     document.querySelectorAll(`select[data-entity-select="${entity.type}"]`).forEach((select) => {
-                        // The server orders by name; insert in place rather than
-                        // appending so the list doesn't drift out of order mid-session.
                         const option = new Option(entity.name, entity.id);
                         const before = [...select.options].find(
                             (o) => o.value !== '' && o.text.trim().localeCompare(entity.name) > 0
