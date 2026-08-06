@@ -464,8 +464,15 @@ class BulkManualEntryTest extends TestCase
         $this->assertEquals(0, Asset::withoutGlobalScopes()->where('tag', 'XT-001')->count());
     }
 
+    /**
+     * Run as an executive user on purpose: a non-executive's department is now
+     * coerced to their own before this check is reached, which would prove the
+     * lock rather than the cross-tenant drop this test exists for.
+     */
     public function test_store_nulls_cross_tenant_department(): void
     {
+        $this->departmentA->update(['is_executive_oversight' => true]);
+        $this->userA->refresh()->unsetRelation('department');
         $this->actingAs($this->userA);
 
         $this->post(route('assets.bulk-manual.store'), [
@@ -677,5 +684,56 @@ class BulkManualEntryTest extends TestCase
         ])->assertSessionHasErrors(['assets.0.model', 'assets.0.serial_number']);
 
         $this->assertEquals(0, Asset::withoutGlobalScopes()->where('tag', 'MOD-004')->count());
+    }
+
+    /**
+     * The grid renders a disabled single-option select for a user without
+     * executive oversight, but that lock lived only in the view: the insert loop
+     * checked department_id against the property and nothing else, so a POST
+     * built by hand could file assets under any department in the property.
+     *
+     * Coerced rather than rejected, matching how this method already handles a
+     * value the caller may not use — a cross-tenant FK is quietly dropped here
+     * too, because a native form post has nowhere useful to show a field error
+     * for a control the user was never given.
+     */
+    public function test_a_non_executive_post_is_filed_under_the_users_own_department(): void
+    {
+        $this->actingAs($this->userA);
+        $this->assertFalse($this->userA->hasExecutiveOversight());
+
+        $other = Department::factory()->create([
+            'property_id' => $this->propertyA->id,
+            'name' => 'Housekeeping Alpha',
+        ]);
+
+        $this->post(route('assets.bulk-manual.store'), [
+            'assets' => [$this->row(['tag' => 'DEP-001', 'department_id' => $other->id])],
+        ])->assertRedirect();
+
+        $asset = Asset::withoutGlobalScopes()->where('tag', 'DEP-001')->firstOrFail();
+
+        $this->assertSame($this->departmentA->id, $asset->department_id);
+    }
+
+    public function test_an_executive_post_keeps_the_department_it_names(): void
+    {
+        $this->departmentA->update(['is_executive_oversight' => true]);
+        $this->userA->refresh()->unsetRelation('department');
+        $this->actingAs($this->userA);
+
+        $other = Department::factory()->create([
+            'property_id' => $this->propertyA->id,
+            'name' => 'Housekeeping Alpha',
+        ]);
+
+        $this->post(route('assets.bulk-manual.store'), [
+            'assets' => [$this->row(['tag' => 'DEP-002', 'department_id' => $other->id])],
+        ])->assertRedirect();
+
+        $this->assertSame(
+            $other->id,
+            Asset::withoutGlobalScopes()->where('tag', 'DEP-002')->firstOrFail()->department_id
+        );
     }
 }

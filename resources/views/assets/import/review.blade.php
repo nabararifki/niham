@@ -39,9 +39,16 @@
         // selection is cleared and remade, and when nothing is selected the <select>
         // is not in the document to append to at all. Driving them from an array
         // quick-add can push into is the only thing that survives both.
+        //
+        // A locked user gets an empty department payload: the only consumer is the
+        // bulk header select, which is replaced by a disabled one for them. Sending
+        // the list anyway would publish every department in the property to a page
+        // that offers none of them.
         $entityOptions = [
             'category'   => $categories->map(fn ($c) => ['id' => (int) $c->id, 'name' => $c->name])->values(),
-            'department' => $departments->map(fn ($d) => ['id' => (int) $d->id, 'name' => $d->name])->values(),
+            'department' => $lockedDepartmentId !== null
+                ? collect()
+                : $departments->map(fn ($d) => ['id' => (int) $d->id, 'name' => $d->name])->values(),
         ];
     @endphp
 
@@ -60,8 +67,17 @@
                 {{-- No action: this form is never submitted natively. Submit is always
                      intercepted by triggerPreflight(), and saving goes through
                      saveAll() → storeBatch(). It exists only to group the fields
-                     that triggerPreflight() serialises via FormData. --}}
-                <form method="POST" id="review-form" @submit.prevent="triggerPreflight()">
+                     that triggerPreflight() serialises via FormData.
+
+                     autocomplete="off" is not about autofill suggestions. Browsers
+                     restore *dirty* control values across a reload, matching them by
+                     form + name + index — and deleting rows reloads this page. Every
+                     cell the user edits is dirty, and so is every cell a bulk edit
+                     writes through (setting .value sets the dirty flag), so without
+                     this the pre-delete values get painted back onto whichever rows
+                     moved up into their positions. The id-keyed names below are the
+                     other half of the same fix. --}}
+                <form method="POST" id="review-form" autocomplete="off" @submit.prevent="triggerPreflight()">
                     @csrf
 
                     {{-- Pass page offset so store() can merge edits at the correct global indices --}}
@@ -234,14 +250,27 @@
                                                     'tooltipText' => __('assets.quick_add_department'),
                                                 ])
                                             </div>
+                                            {{-- Same lock as the row cells. Without it the bulk widget was a
+                                                 way around a rule the rows enforce — and the endpoint refuses
+                                                 the value anyway, so offering the choice would only render a
+                                                 dropdown whose every option fails. --}}
                                             <template x-if="selectionCount > 0">
-                                                <select @change="bulkUpdate('department_id', $event.target.value)"
-                                                        class="{{ $bulkInput }} w-36">
-                                                    <option value="">{{ __('assets.select_placeholder') }}</option>
-                                                    <template x-for="option in departments" :key="option.id">
-                                                        <option :value="option.id" x-text="option.name"></option>
-                                                    </template>
-                                                </select>
+                                                @if ($lockedDepartmentId !== null)
+                                                    <select disabled
+                                                            data-department-locked
+                                                            title="{{ __('assets.auto_assigned_department_warning') }}"
+                                                            class="{{ $bulkInput }} w-36 bg-gray-100 dark:bg-gray-900/70 text-gray-500 dark:text-gray-400 cursor-not-allowed">
+                                                        <option>{{ $lockedDepartmentName }}</option>
+                                                    </select>
+                                                @else
+                                                    <select @change="bulkUpdate('department_id', $event.target.value)"
+                                                            class="{{ $bulkInput }} w-36">
+                                                        <option value="">{{ __('assets.select_placeholder') }}</option>
+                                                        <template x-for="option in departments" :key="option.id">
+                                                            <option :value="option.id" x-text="option.name"></option>
+                                                        </template>
+                                                    </select>
+                                                @endif
                                             </template>
                                         </th>
 
@@ -305,13 +334,19 @@
                                          N+1 ELIMINATED: $categories and $departments are fetched
                                          ONCE in the controller and passed as collections.
                                          The Blade loop below NEVER touches the database.
-                                         Index uses $pageOffset + $localIndex for global uniqueness.
                                     ──────────────────────────────────────────────────────────────── --}}
                                     @forelse($paginatedData as $localIndex => $item)
                                         @php
-                                            // Global index: ensures form field names are unique
-                                            // across all pages (assets[0..49], assets[50..99], etc.)
+                                            // Displayed row number only. Nothing is addressed by it.
                                             $globalIndex = $pageOffset + $localIndex;
+
+                                            // Control names are keyed by the staging row's id, never by
+                                            // its position. Position-keyed names survive a reload as far
+                                            // as the browser is concerned: it restores dirty values onto
+                                            // whatever now sits at that index, so a deleted row's edits
+                                            // reappeared on the row that moved up into its number. An id
+                                            // that is gone matches nothing, which is the point.
+                                            $rowKey      = $item['id'];
                                             $combined    = trim(($item['brand'] ?? '') . ' ' . ($item['model'] ?? ''));
                                         @endphp
                                         {{-- data-row-id is the DOM handle (a future multi-select can
@@ -395,8 +430,8 @@
                                             {{-- Tag --}}
                                             <td class="px-2 py-2.5 whitespace-nowrap">
                                                 <input type="text"
-                                                       name="assets[{{ $localIndex }}][tag]"
-                                                       value="{{ old('assets.'.$localIndex.'.tag', $item['tag'] ?? ('AST-' . strtoupper(\Str::random(6)))) }}"
+                                                       name="assets[{{ $rowKey }}][tag]"
+                                                       value="{{ old('assets.'.$rowKey.'.tag', $item['tag'] ?? ('AST-' . strtoupper(\Str::random(6)))) }}"
                                                        required
                                                        @input.debounce.500ms="autoSave('tag', $event.target.value, $data)"
                                                        class="block w-32 border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:ring-accent focus:border-accent text-xs dark:bg-gray-900/50 dark:text-white" />
@@ -405,8 +440,8 @@
                                             {{-- Name --}}
                                             <td class="px-2 py-2.5 whitespace-nowrap">
                                                 <input type="text"
-                                                       name="assets[{{ $localIndex }}][name]"
-                                                       value="{{ old('assets.'.$localIndex.'.name', $item['name'] ?? '') }}"
+                                                       name="assets[{{ $rowKey }}][name]"
+                                                       value="{{ old('assets.'.$rowKey.'.name', $item['name'] ?? '') }}"
                                                        required
                                                        @input.debounce.500ms="autoSave('name', $event.target.value, $data)"
                                                        class="block w-40 border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:ring-accent focus:border-accent text-xs dark:bg-gray-900/50 dark:text-white" />
@@ -414,53 +449,67 @@
 
                                             {{-- Category — uses pre-fetched $categories collection, ZERO DB queries --}}
                                             <td class="px-2 py-2.5 whitespace-nowrap">
-                                                <select name="assets[{{ $localIndex }}][category_id]"
+                                                <select name="assets[{{ $rowKey }}][category_id]"
                                                         @change="autoSave('category_id', $event.target.value, $data)"
                                                         data-entity-select="category"
                                                         class="block w-36 border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:ring-accent focus:border-accent text-xs dark:bg-gray-900/50 dark:text-white">
                                                     <option value="">{{ __('assets.select_placeholder') }}</option>
                                                     @foreach($categories as $cat)
                                                         <option value="{{ $cat->id }}"
-                                                            {{ old('assets.'.$localIndex.'.category_id', $item['category_id'] ?? '') == $cat->id ? 'selected' : '' }}>
+                                                            {{ old('assets.'.$rowKey.'.category_id', $item['category_id'] ?? '') == $cat->id ? 'selected' : '' }}>
                                                             {{ $cat->name }}
                                                         </option>
                                                     @endforeach
                                                 </select>
                                             </td>
 
-                                            {{-- Department — uses pre-fetched $departments collection, ZERO DB queries --}}
+                                            {{-- Department — uses pre-fetched $departments collection, ZERO DB queries.
+                                                 Locked to the user's own for staff without executive oversight, the
+                                                 same treatment bulk-manual.blade.php and assets/create.blade.php give
+                                                 it. The locked branch carries no name and no data-entity-select: the
+                                                 form is never submitted natively, and a select the user cannot use
+                                                 must not grow options when quick-add creates a department. --}}
                                             <td class="px-2 py-2.5 whitespace-nowrap">
-                                                <select name="assets[{{ $localIndex }}][department_id]"
-                                                        @change="autoSave('department_id', $event.target.value, $data)"
-                                                        data-entity-select="department"
-                                                        class="block w-36 border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:ring-accent focus:border-accent text-xs dark:bg-gray-900/50 dark:text-white">
-                                                    <option value="">{{ __('assets.select_placeholder') }}</option>
-                                                    @foreach($departments as $dept)
-                                                        <option value="{{ $dept->id }}"
-                                                            {{ old('assets.'.$localIndex.'.department_id', $item['department_id'] ?? '') == $dept->id ? 'selected' : '' }}>
-                                                            {{ $dept->name }}
-                                                        </option>
-                                                    @endforeach
-                                                </select>
+                                                @if ($lockedDepartmentId !== null)
+                                                    <select disabled
+                                                            data-department-locked
+                                                            title="{{ __('assets.auto_assigned_department_warning') }}"
+                                                            class="block w-36 border-gray-300 dark:border-gray-600 rounded-md shadow-sm text-xs bg-gray-100 dark:bg-gray-900/70 text-gray-500 dark:text-gray-400 cursor-not-allowed">
+                                                        <option>{{ $lockedDepartmentName }}</option>
+                                                    </select>
+                                                @else
+                                                    <select name="assets[{{ $rowKey }}][department_id]"
+                                                            @change="autoSave('department_id', $event.target.value, $data)"
+                                                            data-entity-select="department"
+                                                            class="block w-36 border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:ring-accent focus:border-accent text-xs dark:bg-gray-900/50 dark:text-white">
+                                                        <option value="">{{ __('assets.select_placeholder') }}</option>
+                                                        @foreach($departments as $dept)
+                                                            <option value="{{ $dept->id }}"
+                                                                {{ old('assets.'.$rowKey.'.department_id', $item['department_id'] ?? '') == $dept->id ? 'selected' : '' }}>
+                                                                {{ $dept->name }}
+                                                            </option>
+                                                        @endforeach
+                                                    </select>
+                                                @endif
                                             </td>
 
                                             {{-- Status --}}
                                             <td class="px-2 py-2.5 whitespace-nowrap">
-                                                <select name="assets[{{ $localIndex }}][status]"
+                                                <select name="assets[{{ $rowKey }}][status]"
                                                         required
                                                         @change="autoSave('status', $event.target.value, $data)"
                                                         class="block w-32 border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:ring-accent focus:border-accent text-xs dark:bg-gray-900/50 dark:text-white">
-                                                    <option value="in_service"    {{ old('assets.'.$localIndex.'.status', $item['status'] ?? '') == 'in_service'    ? 'selected' : '' }}>{{ __('assets.in_service') }}</option>
-                                                    <option value="out_of_service"{{ old('assets.'.$localIndex.'.status', $item['status'] ?? '') == 'out_of_service' ? 'selected' : '' }}>{{ __('assets.out_of_service') }}</option>
-                                                    <option value="disposed"      {{ old('assets.'.$localIndex.'.status', $item['status'] ?? '') == 'disposed'       ? 'selected' : '' }}>{{ __('assets.disposed') }}</option>
+                                                    <option value="in_service"    {{ old('assets.'.$rowKey.'.status', $item['status'] ?? '') == 'in_service'    ? 'selected' : '' }}>{{ __('assets.in_service') }}</option>
+                                                    <option value="out_of_service"{{ old('assets.'.$rowKey.'.status', $item['status'] ?? '') == 'out_of_service' ? 'selected' : '' }}>{{ __('assets.out_of_service') }}</option>
+                                                    <option value="disposed"      {{ old('assets.'.$rowKey.'.status', $item['status'] ?? '') == 'disposed'       ? 'selected' : '' }}>{{ __('assets.disposed') }}</option>
                                                 </select>
                                             </td>
 
                                             {{-- Model/Brand --}}
                                             <td class="px-2 py-2.5 whitespace-nowrap">
                                                 <input type="text"
-                                                       name="assets[{{ $localIndex }}][model]"
-                                                       value="{{ old('assets.'.$localIndex.'.model', $combined) }}"
+                                                       name="assets[{{ $rowKey }}][model]"
+                                                       value="{{ old('assets.'.$rowKey.'.model', $combined) }}"
                                                        @input.debounce.500ms="autoSave('model', $event.target.value, $data)"
                                                        class="block w-32 border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:ring-accent focus:border-accent text-xs dark:bg-gray-900/50 dark:text-white" />
                                             </td>
@@ -468,8 +517,8 @@
                                             {{-- Serial Number --}}
                                             <td class="px-2 py-2.5 whitespace-nowrap">
                                                 <input type="text"
-                                                       name="assets[{{ $localIndex }}][serial_number]"
-                                                       value="{{ old('assets.'.$localIndex.'.serial_number', $item['serial_number'] ?? '') }}"
+                                                       name="assets[{{ $rowKey }}][serial_number]"
+                                                       value="{{ old('assets.'.$rowKey.'.serial_number', $item['serial_number'] ?? '') }}"
                                                        @input.debounce.500ms="autoSave('serial_number', $event.target.value, $data)"
                                                        class="block w-32 border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:ring-accent focus:border-accent text-xs dark:bg-gray-900/50 dark:text-white" />
                                             </td>
@@ -477,8 +526,8 @@
                                             {{-- Purchase Date --}}
                                             <td class="px-2 py-2.5 whitespace-nowrap">
                                                 <input type="date"
-                                                       name="assets[{{ $localIndex }}][purchase_date]"
-                                                       value="{{ old('assets.'.$localIndex.'.purchase_date', $item['purchase_date'] ?? '') }}"
+                                                       name="assets[{{ $rowKey }}][purchase_date]"
+                                                       value="{{ old('assets.'.$rowKey.'.purchase_date', $item['purchase_date'] ?? '') }}"
                                                        @change="autoSave('purchase_date', $event.target.value, $data)"
                                                        class="block w-36 border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:ring-accent focus:border-accent text-xs dark:bg-gray-900/50 dark:text-white" />
                                             </td>
@@ -487,8 +536,8 @@
                                             <td class="px-2 py-2.5 whitespace-nowrap">
                                                 <input type="number"
                                                        step="any"
-                                                       name="assets[{{ $localIndex }}][purchase_cost]"
-                                                       value="{{ old('assets.'.$localIndex.'.purchase_cost', $item['purchase_cost'] ?? '') }}"
+                                                       name="assets[{{ $rowKey }}][purchase_cost]"
+                                                       value="{{ old('assets.'.$rowKey.'.purchase_cost', $item['purchase_cost'] ?? '') }}"
                                                        @input.debounce.500ms="autoSave('purchase_cost', $event.target.value, $data)"
                                                        class="block w-28 border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:ring-accent focus:border-accent text-xs dark:bg-gray-900/50 dark:text-white" />
                                             </td>
@@ -496,8 +545,8 @@
                                             {{-- Remarks --}}
                                             <td class="px-2 py-2.5 whitespace-nowrap">
                                                 <input type="text"
-                                                       name="assets[{{ $localIndex }}][remarks]"
-                                                       value="{{ old('assets.'.$localIndex.'.remarks', $item['remarks'] ?? '') }}"
+                                                       name="assets[{{ $rowKey }}][remarks]"
+                                                       value="{{ old('assets.'.$rowKey.'.remarks', $item['remarks'] ?? '') }}"
                                                        @input.debounce.500ms="autoSave('remarks', $event.target.value, $data)"
                                                        class="block w-40 border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:ring-accent focus:border-accent text-xs dark:bg-gray-900/50 dark:text-white" />
                                             </td>
