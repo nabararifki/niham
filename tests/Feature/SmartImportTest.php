@@ -2616,6 +2616,10 @@ class SmartImportTest extends TestCase
      */
     public function test_the_bulk_header_select_renders_from_state_rather_than_blade(): void
     {
+        // Executive: the department header select is replaced by a locked one for
+        // everybody else, and this test is about how the select is fed, not who
+        // may see it. §15 covers the lock.
+        $this->makeUserAExecutive();
         $this->actingAs($this->userA);
         $this->seedThreeStagingRows();
 
@@ -3607,6 +3611,334 @@ class SmartImportTest extends TestCase
             $this->assertNotEquals($en, __('assets.'.$key, ['value' => 'x']),
                 "Key [{$key}] is not actually translated.");
         }
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // 15. DEPARTMENT LOCK (non-executive users may only assign their own)
+    // ══════════════════════════════════════════════════════════════
+
+    /**
+     * hasExecutiveOversight() reads the department relation and reuses it once
+     * loaded, so flipping the column alone leaves a stale answer behind on a
+     * user instance that has already been through actingAs().
+     */
+    private function makeUserAExecutive(): void
+    {
+        $this->departmentA->update(['is_executive_oversight' => true]);
+        $this->userA->refresh()->unsetRelation('department');
+    }
+
+    private function secondDepartmentInPropertyA(): Department
+    {
+        return Department::factory()->create([
+            'property_id' => $this->propertyA->id,
+            'name'        => 'Housekeeping Alpha',
+        ]);
+    }
+
+    /**
+     * The whole reason Smart Import auto-fills department_id from the importing
+     * user is that non-executive staff are assumed to handle only their own
+     * department's assets. The review page is where that assumption was quietly
+     * dropped — and a UI-level lock is no lock at all, so the check has to live
+     * where a hand-written request also hits it.
+     */
+    public function test_a_non_executive_cannot_reassign_a_row_to_another_department(): void
+    {
+        $this->actingAs($this->userA);
+        $this->assertFalse($this->userA->hasExecutiveOversight(), 'Fixture assumption: userA is not executive.');
+
+        $other = $this->secondDepartmentInPropertyA();
+        $rowId = $this->seedStagingRow();
+
+        $this->postJson(route('assets.import.update-row'), [
+            'row_id'     => $rowId,
+            'field_name' => 'department_id',
+            'new_value'  => (string) $other->id,
+        ])->assertStatus(422);
+
+        $this->assertEquals(
+            $this->departmentA->id,
+            \DB::table('temporary_asset_imports')->find($rowId)->department_id,
+            'The row was reassigned despite the 422.'
+        );
+    }
+
+    /**
+     * Clearing counts as leaving their own department, which the lock exists to
+     * prevent — otherwise the escape hatch is one empty string wide.
+     */
+    public function test_a_non_executive_cannot_clear_the_department_either(): void
+    {
+        $this->actingAs($this->userA);
+        $rowId = $this->seedStagingRow();
+
+        $this->postJson(route('assets.import.update-row'), [
+            'row_id'     => $rowId,
+            'field_name' => 'department_id',
+            'new_value'  => '',
+        ])->assertStatus(422);
+
+        $this->assertEquals($this->departmentA->id,
+            \DB::table('temporary_asset_imports')->find($rowId)->department_id);
+    }
+
+    public function test_a_non_executive_may_still_set_their_own_department(): void
+    {
+        $this->actingAs($this->userA);
+        $rowId = $this->seedStagingRow(['department_id' => null]);
+
+        $this->postJson(route('assets.import.update-row'), [
+            'row_id'     => $rowId,
+            'field_name' => 'department_id',
+            'new_value'  => (string) $this->departmentA->id,
+        ])->assertStatus(200);
+
+        $this->assertEquals($this->departmentA->id,
+            \DB::table('temporary_asset_imports')->find($rowId)->department_id);
+    }
+
+    /**
+     * The bulk path must not be the way around the lock, and — like the FK check
+     * it sits beside — it has to refuse before writing, or a rejected value would
+     * still land on part of the selection.
+     */
+    public function test_the_bulk_path_enforces_the_department_lock_before_writing(): void
+    {
+        $this->actingAs($this->userA);
+
+        $other = $this->secondDepartmentInPropertyA();
+        $ids   = [$this->seedStagingRow(), $this->seedStagingRow(), $this->seedStagingRow()];
+
+        $this->postJson(route('assets.import.bulk-update-rows'), [
+            'row_ids'    => $ids,
+            'field_name' => 'department_id',
+            'new_value'  => (string) $other->id,
+        ])->assertStatus(422);
+
+        foreach (\DB::table('temporary_asset_imports')->whereIn('id', $ids)->get() as $row) {
+            $this->assertEquals($this->departmentA->id, $row->department_id,
+                'A row in the selection was reassigned despite the 422.');
+        }
+
+        // The user's own department still goes through in bulk.
+        $this->postJson(route('assets.import.bulk-update-rows'), [
+            'row_ids'    => $ids,
+            'field_name' => 'department_id',
+            'new_value'  => (string) $this->departmentA->id,
+        ])->assertStatus(200);
+    }
+
+    /**
+     * The guard is the oversight flag, not a blanket ban on editing the column —
+     * an executive user must keep the free choice they have everywhere else.
+     */
+    public function test_an_executive_user_may_assign_any_department_in_the_property(): void
+    {
+        $this->makeUserAExecutive();
+        $this->actingAs($this->userA);
+
+        $other = $this->secondDepartmentInPropertyA();
+        $rowId = $this->seedStagingRow();
+
+        $this->postJson(route('assets.import.update-row'), [
+            'row_id'     => $rowId,
+            'field_name' => 'department_id',
+            'new_value'  => (string) $other->id,
+        ])->assertStatus(200);
+
+        $this->postJson(route('assets.import.bulk-update-rows'), [
+            'row_ids'    => [$rowId],
+            'field_name' => 'department_id',
+            'new_value'  => (string) $other->id,
+        ])->assertStatus(200);
+
+        $this->assertEquals($other->id,
+            \DB::table('temporary_asset_imports')->find($rowId)->department_id);
+    }
+
+    /**
+     * A staging row can predate the lock — imported before the user changed
+     * departments, or written by a path that no longer exists. The review page
+     * shows such a user one fixed department, so that is what has to import;
+     * otherwise the page would be describing a value nobody could see.
+     */
+    public function test_a_stale_department_on_a_staging_row_imports_as_the_users_own(): void
+    {
+        $this->actingAs($this->userA);
+        $this->grantPermission('perm_assets', 'full access');
+
+        $stale = $this->secondDepartmentInPropertyA();
+        $this->seedStagingRow(['tag' => 'STALE-1', 'name' => 'Stale Dept Row', 'department_id' => $stale->id]);
+
+        $this->postJson(route('assets.import-store-batch'), ['offset' => 0, 'limit' => 500])
+            ->assertStatus(200);
+
+        $this->assertSame(
+            $this->departmentA->id,
+            Asset::withoutGlobalScopes()->where('tag', 'STALE-1')->firstOrFail()->department_id
+        );
+    }
+
+    /**
+     * Rendering half a lock is worse than none: a dropdown that offers choices the
+     * server will refuse reads as a broken page. Both surfaces are pinned — the
+     * per-row select and the bulk-edit header select, which is a separate piece of
+     * markup fed from component state and was never covered by the row's behaviour.
+     */
+    public function test_the_review_page_locks_both_department_widgets_for_a_non_executive(): void
+    {
+        $this->actingAs($this->userA);
+        $other = $this->secondDepartmentInPropertyA();
+        $this->seedThreeStagingRows();
+
+        $html = $this->get(route('assets.import-review'))->assertStatus(200)->getContent();
+
+        $this->assertStringNotContainsString($other->name, $html,
+            'A department the user may not assign is still offered.');
+        $this->assertStringNotContainsString("autoSave('department_id'", $html);
+        $this->assertStringNotContainsString("bulkUpdate('department_id'", $html);
+
+        // Quick-add must not be able to grow a locked select either.
+        $this->assertStringNotContainsString('data-entity-select="department"', $html);
+
+        // One disabled select per row, plus the one in the bulk-edit header.
+        $this->assertSame(4, substr_count($html, 'data-department-locked'));
+        $this->assertStringContainsString($this->departmentA->name, $html);
+    }
+
+    public function test_the_review_page_leaves_both_department_widgets_open_for_an_executive(): void
+    {
+        $this->makeUserAExecutive();
+        $this->actingAs($this->userA);
+        $other = $this->secondDepartmentInPropertyA();
+        $this->seedThreeStagingRows();
+
+        $html = $this->get(route('assets.import-review'))->assertStatus(200)->getContent();
+
+        $this->assertStringContainsString($other->name, $html);
+        $this->assertStringContainsString("autoSave('department_id'", $html);
+        $this->assertStringContainsString("bulkUpdate('department_id'", $html);
+        $this->assertStringNotContainsString('data-department-locked', $html);
+
+        $names = array_column($this->alpineConfigValue($html, 'departments'), 'name');
+        $this->assertContains($other->name, $names);
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // 16. POST-DELETE RENDER FOLLOWS ROW IDENTITY, NOT POSITION
+    // ══════════════════════════════════════════════════════════════
+
+    /**
+     * Reported symptom: bulk-edit a few rows, delete them, and the change appears
+     * to follow the row *number* onto whichever row moved up into it.
+     *
+     * The mechanism is browser form-state restoration across the post-delete
+     * reload: it re-applies dirty control values by form + name + index, and every
+     * editable cell used to be named assets[<page position>][field]. Nothing
+     * wrong ever reaches the database — this test proves that half — and the fix
+     * is to name controls after the row's id so a position no longer identifies a
+     * value that the browser can restore onto a different row.
+     *
+     * PHPUnit renders HTML, it does not run a browser, so the restoration itself
+     * is out of reach here. What is in reach, and is what this asserts: the server
+     * re-renders by identity, and the markup no longer carries a position→value
+     * binding for the browser to act on.
+     */
+    public function test_a_bulk_edited_value_does_not_follow_the_row_number_after_a_delete(): void
+    {
+        $this->actingAs($this->userA);
+
+        $ids   = $this->seedThreeStagingRows();
+        $other = Category::factory()->create([
+            'property_id' => $this->propertyA->id,
+            'name'        => 'Furniture Alpha',
+        ]);
+
+        // Bulk-edit A and B — the two rows that are about to be deleted.
+        $this->postJson(route('assets.import.bulk-update-rows'), [
+            'row_ids'    => [$ids['A'], $ids['B']],
+            'field_name' => 'category_id',
+            'new_value'  => (string) $other->id,
+        ])->assertStatus(200);
+
+        $this->postJson(route('assets.import.delete-rows'), [
+            'row_ids' => [$ids['A'], $ids['B']],
+        ])->assertStatus(200);
+
+        // The database is the ground truth the render has to agree with.
+        $remaining = \DB::table('temporary_asset_imports')->get();
+        $this->assertCount(1, $remaining);
+        $this->assertEquals($this->categoryA->id, $remaining->first()->category_id,
+            'Row C was never selected; its category must be untouched.');
+
+        $html = $this->get(route('assets.import-review'))->assertStatus(200)->getContent();
+
+        // Row C now occupies position #1, the number row A used to have.
+        $rowC = $this->extractRowMarkup($html, $ids['C']);
+        $this->assertStringContainsString('TAG-C', $rowC);
+        $this->assertSame(
+            (string) $this->categoryA->id,
+            $this->selectedValueFor($rowC, $ids['C'], 'category_id'),
+            'The row that moved up into #1 is showing the deleted row\'s bulk-edited category.'
+        );
+
+        // Identity, not position: the surviving row's controls are named after its
+        // id, so the browser has nothing to restore the deleted row's values onto.
+        $this->assertStringContainsString('name="assets['.$ids['C'].'][tag]"', $rowC);
+        $this->assertStringNotContainsString('name="assets[0][', $html);
+        $this->assertStringNotContainsString('name="assets['.$ids['A'].'][', $html);
+    }
+
+    /**
+     * The declarative half of the same fix, and the reason the id-keyed names are
+     * not load-bearing on their own: a form the user agent has been told not to
+     * remember cannot repopulate anything after a reload.
+     */
+    public function test_the_review_form_opts_out_of_browser_value_restoration(): void
+    {
+        $this->actingAs($this->userA);
+        $this->seedThreeStagingRows();
+
+        $html = $this->get(route('assets.import-review'))->assertStatus(200)->getContent();
+
+        // Matched on the review form's own tag: autocomplete="off" appears
+        // elsewhere in the rendered layout, so a bare assertSee() would pass
+        // whether or not this form carries it.
+        $this->assertMatchesRegularExpression(
+            '/<form[^>]*id="review-form"[^>]*autocomplete="off"/',
+            $html,
+            'The review form does not opt out of value restoration.'
+        );
+    }
+
+    /**
+     * @return string  the <tr> for one staging row, so an assertion about that row
+     *                 cannot accidentally be satisfied by a different one.
+     */
+    private function extractRowMarkup(string $html, int $rowId): string
+    {
+        $start = strpos($html, '<tr data-row-id="'.$rowId.'"');
+        $this->assertNotFalse($start, "No rendered row for id {$rowId}.");
+
+        $end = strpos($html, '</tr>', $start);
+
+        return substr($html, $start, $end - $start);
+    }
+
+    /**
+     * The value carrying `selected` inside one row's <select> for a given column.
+     * Read out of the markup rather than asserted as a literal string, because the
+     * attribute is emitted on its own line by the Blade ternary.
+     */
+    private function selectedValueFor(string $rowMarkup, int $rowId, string $field): ?string
+    {
+        $start = strpos($rowMarkup, 'name="assets['.$rowId.']['.$field.']"');
+        $this->assertNotFalse($start, "No [{$field}] select rendered for row {$rowId}.");
+
+        $select = substr($rowMarkup, $start, strpos($rowMarkup, '</select>', $start) - $start);
+
+        return preg_match('/<option value="([^"]*)"\s+selected/', $select, $m) ? $m[1] : null;
     }
 }
 

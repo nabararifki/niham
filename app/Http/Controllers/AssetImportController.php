@@ -912,6 +912,19 @@ class AssetImportController extends Controller
         $categoriesMap  = $categories->keyBy('id');
         $departmentsMap = $departments->keyBy('id');
 
+        // Non-executive staff may only ever assign their own department — the
+        // same rule assets/create, bulk-manual and the mapping screen already
+        // apply, and the reason ProcessImportJob auto-fills department_id from
+        // the importing user in the first place. null means "let them choose",
+        // which also covers a user who has no department at all.
+        //
+        // lockedDepartmentId() resolves the relation on the way past, so reading
+        // the name off it here cannot trip shouldBeStrict()'s lazy-load guard.
+        $lockedDepartmentId   = $this->lockedDepartmentId();
+        $lockedDepartmentName = $lockedDepartmentId !== null
+            ? optional(auth()->user()->department)->name
+            : null;
+
         $pageOffset = ($currentPage - 1) * $perPage;
 
         // rowId => [field => raw value that would not convert]. Decoded here rather
@@ -931,6 +944,8 @@ class AssetImportController extends Controller
             'coercionNotes',
             'categoriesMap',
             'departmentsMap',
+            'lockedDepartmentId',
+            'lockedDepartmentName',
             'warning',
             'pageOffset',
             'total',
@@ -1036,6 +1051,13 @@ class AssetImportController extends Controller
             return response()->json(['success' => false, 'message' => 'No active property.'], 403);
         }
 
+        // A user without executive oversight may only ever name their own
+        // department. Checked here, not only in the view, because this endpoint
+        // takes a hand-written request just as happily as it takes the page's.
+        if ($this->violatesDepartmentLock($fieldName, $newValue)) {
+            return response()->json(['success' => false, 'message' => 'Department is fixed by policy.'], 422);
+        }
+
         // For FK fields, confirm the submitted ID exists within the active property
         // before writing it — prevents assigning an entity from another tenant.
         if (in_array($fieldName, ['category_id', 'department_id']) && !empty($newValue)) {
@@ -1109,6 +1131,52 @@ class AssetImportController extends Controller
             'validCount'   => $validCount,
             'invalidCount' => $invalidCount,
         ]);
+    }
+
+    /**
+     * The one department this user is allowed to assign, or null if they may
+     * choose freely.
+     *
+     * Staff without executive oversight handle only their own department's
+     * assets — which is why ProcessImportJob auto-fills department_id from the
+     * importing user and the mapping screen shows that column as fixed. The
+     * review page is where the rule has to hold too, and holding it in the view
+     * alone is no rule at all: the endpoints below are reachable directly.
+     *
+     * Order matters. hasExecutiveOversight() loads the department relation
+     * itself, so it must be evaluated before the relation is read — a bare
+     * $user->department first would trip shouldBeStrict()'s lazy-load guard.
+     * Same shape as BulkAssetEntryController::create(), deliberately.
+     */
+    private function lockedDepartmentId(): ?int
+    {
+        $user = auth()->user();
+
+        if ($user->hasExecutiveOversight()) {
+            return null;
+        }
+
+        $departmentId = optional($user->department)->id;
+
+        return $departmentId ? (int) $departmentId : null;
+    }
+
+    /**
+     * Would this edit move a row's department away from the one the caller is
+     * locked to? An empty value counts: "only ever their own department"
+     * includes not clearing it, or the way out is one empty string wide.
+     *
+     * Shared by the single-cell and bulk paths so neither can be the lenient one.
+     */
+    private function violatesDepartmentLock(string $fieldName, ?string $newValue): bool
+    {
+        if ($fieldName !== 'department_id') {
+            return false;
+        }
+
+        $locked = $this->lockedDepartmentId();
+
+        return $locked !== null && (int) $newValue !== $locked;
     }
 
     /**
@@ -1234,9 +1302,14 @@ class AssetImportController extends Controller
             return response()->json(['success' => false, 'message' => 'No active property.'], 403);
         }
 
-        // Identical FK check to updateSingleRow(). Runs BEFORE any write, so a
-        // rejected value cannot land on part of the selection — and so the bulk
-        // path is not a way around a rule the single-cell path enforces.
+        // Both checks below run BEFORE any write, so a rejected value cannot land
+        // on part of the selection — and so the bulk path is not a way around a
+        // rule the single-cell path enforces.
+        if ($this->violatesDepartmentLock($fieldName, $newValue)) {
+            return response()->json(['success' => false, 'message' => 'Department is fixed by policy.'], 422);
+        }
+
+        // Identical FK check to updateSingleRow().
         if (in_array($fieldName, ['category_id', 'department_id']) && !empty($newValue)) {
             $table  = $fieldName === 'category_id' ? 'categories' : 'departments';
             $exists = \DB::table($table)
@@ -1344,6 +1417,13 @@ class AssetImportController extends Controller
             $validCategoryIds   = Category::where('property_id', $propertyId)->pluck('id')->toArray();
             $validDepartmentIds = Department::where('property_id', $propertyId)->pluck('id')->toArray();
 
+            // The review page shows a locked user a single, fixed department, and
+            // the edit endpoints refuse anything else — but a staging row could
+            // still carry an older value (imported before the user moved
+            // departments, say). Coerced here so what imports is what the page
+            // said it would, rather than something only this method would know.
+            $lockedDepartmentId = $this->lockedDepartmentId();
+
             // Fetch the batch slice of valid staging rows
             $rows = $stagingBase->clone()
                 ->orderBy('id')
@@ -1357,6 +1437,8 @@ class AssetImportController extends Controller
             foreach ($rows as $row) {
                 $catId  = in_array($row->category_id, $validCategoryIds)   ? (int) $row->category_id  : null;
                 $deptId = in_array($row->department_id, $validDepartmentIds) ? (int) $row->department_id : null;
+
+                if ($lockedDepartmentId !== null) $deptId = $lockedDepartmentId;
 
                 if (!$catId) continue; // category_id is required — skip rows with cross-tenant FK
 

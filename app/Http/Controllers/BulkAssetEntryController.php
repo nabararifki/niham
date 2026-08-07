@@ -134,6 +134,17 @@ class BulkAssetEntryController extends Controller
         $validCategoryIds   = Category::where('property_id', $propertyId)->pluck('id')->flip();
         $validDepartmentIds = Department::where('property_id', $propertyId)->pluck('id')->flip();
 
+        // create() renders the Department cell as a disabled single-option select
+        // for staff without executive oversight, but that lock lived only in the
+        // view: nothing here stopped a hand-built POST from filing assets under
+        // any department in the property. Coerced rather than rejected, matching
+        // how this loop already treats a value the caller may not use — a native
+        // form post has nowhere useful to show a field error for a control the
+        // user was never given.
+        $lockedDepartmentId = auth()->user()->hasExecutiveOversight()
+            ? null
+            : optional(auth()->user()->department)->id;
+
         $allData    = collect($request->input('assets', []))->values()->toArray();
         $insertRows = [];
         foreach ($allData as $item) {
@@ -143,6 +154,8 @@ class BulkAssetEntryController extends Controller
 
             $catId  = (int) $item['category_id'];
             $deptId = !empty($item['department_id']) ? (int) $item['department_id'] : null;
+
+            if ($lockedDepartmentId !== null) $deptId = (int) $lockedDepartmentId;
 
             // Skip rows referencing a category or department from another property.
             if (!isset($validCategoryIds[$catId])) continue;
