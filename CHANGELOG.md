@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.8] - 2026-08-29
+### Added
+- **Excel Formula Evaluation in Smart Importer**: Spreadsheet cells containing formulas (`FormulaCell`, e.g. `=CONCATENATE(...)`, `=SUM(...)`) now stage their evaluated computed values instead of raw formula strings. The computed values cached in the XLSX XML `<v>` node are extracted via `CoercesImportValues::rowToStrings()`.
+- **Live Preview Formula Synchronization**: The mapping page's Live Preview (`AssetImportService@peek`) uses the same `rowToStrings()` extractor, ensuring preview data matches the staged import data.
+- **Skipped Blank & Ignored Rows Handling**: Rows that contain data only in columns mapped to the "Ignored" zone are treated as empty rows and skipped from staging.
+- **Visual Mapping Indicators & Review Banner**: Live Preview displays an amber badge highlighting rows that will be skipped along with a reactive count (`assets.preview_skipped_count`). The review page displays an informational warning banner (`assets.import_skipped_blank_rows`) when unmapped blank rows are skipped.
+
+### Fixed
+- **Import Progress Pre-Count Synchronization**: `ProcessImportJob@countDataRows` now applies the same mapping rules and header column checks as the main import loop (`rowHasMappedValue()`), ensuring the progress bar total matches the actual staged row count and reaches 100%.
+
+### Changed
+- **Test Coverage**: 226 → 235 (`SmartImportTest` 149 → 158). Added 9 new feature tests covering ignored column filtering, single mapped non-name fields, progress total agreement, review page skipped banners, mapping preview drop indicators, formula string computed value staging, numeric formula conversion, and peek preview resolution.
+
+### Upgrade Notes
+- **No migration.** No schema changes in this release.
+- **`npm run build` not required.** Uses existing Tailwind utility classes.
+- **Queue worker restart required.** Queue workers should be restarted so background jobs load the updated cell extraction and formula resolution logic.
+- **`php artisan view:clear` recommended.** Clears cached Blade views for the mapping page and updated translation strings.
+
 ## [0.14.7] - 2026-08-07
 ### Fixed
 - **Department Was Not Locked On The Review Page**: Every other place an asset can be filed — the single-asset create form, the Bulk Add Manual grid, the import mapping page, and `ProcessImportJob`, which stamps the importing user's own department onto every staged row — restricts staff without executive oversight to their own department. The Smart Import review page then reopened it: both the per-row Department dropdown and the bulk-edit header dropdown listed every department in the property, so a user could undo the assignment the job had just made for them. Both widgets now render as a disabled single-option select showing the user's own department, and the department list is no longer published to the page's Alpine state at all when it is locked. This was never a regression from the quick-add or multi-select work — `git log -S` shows the check has never existed on this page in any commit.
