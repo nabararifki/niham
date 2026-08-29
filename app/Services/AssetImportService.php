@@ -62,10 +62,13 @@ class AssetImportService
                 foreach ($sheet->getRowIterator() as $row) {
                     /** @var Row $row */
                     // Shared with the import job, so the preview and the import
-                    // agree on what a cell says. This guarded DateTimeInterface but
-                    // not DateInterval, so a duration-formatted cell threw here and
-                    // took the mapping page down with it.
-                    $cells = array_map(fn ($val) => $this->coerceToString($val), $row->toArray());
+                    // agree on what a cell says — including a formula cell, which
+                    // must preview as its computed value or the user would map a
+                    // column showing '=SUM(...)' and get a number, or the reverse.
+                    // The cast this replaced guarded DateTimeInterface but not
+                    // DateInterval, so a duration-formatted cell threw here and took
+                    // the mapping page down with it.
+                    $cells = $this->rowToStrings($row);
 
                     $firstSheetRows[] = $cells;
                     $rowCount++;

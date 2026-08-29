@@ -99,6 +99,52 @@ trait CoercesImportValues
     }
 
     /**
+     * Read one spreadsheet row as an array of strings, keyed by column position.
+     *
+     * The single place any reader row is turned into cell text — peek(), the import
+     * loop and the progress pre-pass all come through here, so the preview cannot
+     * show one thing and the import stage another.
+     *
+     * Row::toArray() is deliberately NOT used. It calls Cell::getValue(), and for a
+     * cell containing a formula that is the formula SOURCE ('=SUM(A1:A2)'), not its
+     * result — so a mapped column full of formulas staged the literal text people
+     * see in the formula bar. The value Excel computed is right there: the reader
+     * parses the <v> node sitting next to <f> and keeps it on the cell, one method
+     * call away (Reader/XLSX/Helper/CellValueFormatter::extractAndFormatNodeValue).
+     * Nothing here evaluates a formula; it reads what the file already cached.
+     *
+     * @param  \OpenSpout\Common\Entity\Row $row
+     * @return array<int, string>
+     */
+    protected function rowToStrings($row): array
+    {
+        // array_map over ->cells rather than a foreach: Row allows holes in the
+        // index, and array_map preserves the original keys that cells are read at.
+        return array_map(
+            fn ($cell) => $this->coerceToString($this->resolveCellValue($cell)),
+            $row->cells
+        );
+    }
+
+    /**
+     * The value a cell actually carries.
+     *
+     * Only formula cells need special handling. A formula whose cached result was
+     * an error (#DIV/0!, #REF!) has a null computed value — the reader discards the
+     * ErrorCell rather than storing it — and so reads as empty. That is the right
+     * outcome: an empty cell is something the user can fix on the review page,
+     * whereas the string '=A1/0' would be staged as if someone had typed it.
+     *
+     * @param \OpenSpout\Common\Entity\Cell $cell
+     */
+    protected function resolveCellValue($cell): mixed
+    {
+        return $cell instanceof \OpenSpout\Common\Entity\Cell\FormulaCell
+            ? $cell->getComputedValue()
+            : $cell->getValue();
+    }
+
+    /**
      * Coerce a value into a decimal string, or explain why it could not be.
      *
      * Handles what people actually put in a cost column: currency prefixes, and

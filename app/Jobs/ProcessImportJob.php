@@ -103,7 +103,8 @@ class ProcessImportJob implements ShouldQueue
         int $processed,
         int $total,
         ?string $errorCode = null,
-        ?string $errorDetail = null
+        ?string $errorDetail = null,
+        int $skipped = 0
     ): void {
         if (! $this->isCurrentAttempt()) {
             return;
@@ -116,6 +117,11 @@ class ProcessImportJob implements ShouldQueue
             'percentage'   => $percentage,
             'processed'    => $processed,
             'total'        => $total,
+            // Rows the file contained but the import did not stage, because every
+            // mapped column was empty for them. review() turns this into the banner
+            // that tells the user it happened — the alternative is a row count that
+            // quietly disagrees with the file they uploaded.
+            'skipped'      => $skipped,
             'error'        => '',
             'error_code'   => $errorCode,
             // Diagnostic, not user-facing copy. status() only releases it to a
@@ -304,6 +310,7 @@ class ProcessImportJob implements ShouldQueue
 
         $header        = null;
         $processedRows = 0;
+        $skippedRows   = 0;
         $sheetIndex    = 0;
         $targetSheet   = is_numeric($this->selectedSheet) ? (int) $this->selectedSheet : 0;
         $resultsChunk  = [];
@@ -315,9 +322,19 @@ class ProcessImportJob implements ShouldQueue
             ->where('property_id', $propertyId)
             ->delete();
 
-        // Pre-count data rows with a lightweight pass (no mapping, no DB writes)
-        // so the progress bar can show a meaningful percentage.
-        $totalRows = $this->countDataRows($fullPath, $extension, $targetSheet, $expectedHeader, $headerRowIndex);
+        // Pre-count data rows with a second pass over the same file so the progress
+        // bar can show a meaningful percentage. It is handed the mapping because it
+        // must select rows by exactly the rule the loop below uses; see the note on
+        // the method.
+        $totalRows = $this->countDataRows(
+            $fullPath,
+            $extension,
+            $targetSheet,
+            $expectedHeader,
+            $headerRowIndex,
+            $mapping,
+            $headerColumns,
+        );
 
         $this->setProgress('processing', 0, $totalRows);
 
@@ -330,10 +347,11 @@ class ProcessImportJob implements ShouldQueue
             $rowNumber = 0;
 
             foreach ($sheet->getRowIterator() as $row) {
-                // Every cell shape goes through the shared coercion, including the
+                // Every cell shape goes through the shared reader, including the
                 // ones a bare (string) cast cannot survive — a duration cell used to
-                // throw here and take the whole import down with it.
-                $cells = array_map(fn ($val) => $this->coerceToString($val), $row->toArray());
+                // throw here and take the whole import down with it — and the
+                // formula cells whose computed value sits behind a second accessor.
+                $cells = $this->rowToStrings($row);
 
                 $currentRow = $rowNumber++;
 
@@ -360,24 +378,23 @@ class ProcessImportJob implements ShouldQueue
                     continue;
                 }
 
-                $getCombined = function (string $fieldId) use ($mapping, $header, $headerColumns, $cells): string {
-                    $mapInfo = $mapping[$fieldId] ?? null;
-                    if (!$mapInfo || empty($mapInfo['columns'])) return '';
-                    $vals = [];
-                    foreach ($mapInfo['columns'] as $colName) {
-                        // header_columns is keyed by the column's real position, so a
-                        // hit returns the index to read directly. Falling back to the
-                        // raw header keeps pre-existing import sessions working.
-                        $colIdx = !empty($headerColumns)
-                            ? array_search($colName, $headerColumns, true)
-                            : array_search($colName, $header);
+                // A row carrying nothing in any column the user actually mapped is
+                // not data — it is a blank or leftover row, and staging it only
+                // gives the user something to delete by hand. A value in an IGNORED
+                // column does not count: the user said that column is not part of
+                // the import, so it cannot be the sole reason a row survives.
+                //
+                // This used to be a hardcoded test on four fields (tag, name,
+                // category, serial_number), which dropped a row whose only mapped
+                // value was, say, Remarks — data the user had deliberately mapped,
+                // discarded without a word.
+                if (! $this->rowHasMappedValue($mapping, $header, $headerColumns, $cells)) {
+                    $skippedRows++;
+                    continue;
+                }
 
-                        if ($colIdx !== false && isset($cells[$colIdx]) && $cells[$colIdx] !== '') {
-                            $vals[] = $cells[$colIdx];
-                        }
-                    }
-                    return implode($mapInfo['separator'] ?? ' ', $vals);
-                };
+                $getCombined = fn (string $fieldId): string
+                    => $this->combinedValue($fieldId, $mapping, $header, $headerColumns, $cells);
 
                 $statusRaw = strtolower($getCombined('status'));
                 if (preg_match('/(aktif|active|in.?service|baik|good|bagus)/i', $statusRaw)) {
@@ -392,11 +409,6 @@ class ProcessImportJob implements ShouldQueue
 
                 $tag  = $getCombined('tag');
                 $name = $getCombined('name');
-
-                // Skip completely empty rows
-                if ($tag === '' && $name === '' && $getCombined('category') === '' && $getCombined('serial_number') === '') {
-                    continue;
-                }
 
                 $isEmpty   = empty($name) && empty($tag);
                 $isInvalid = $isEmpty ? false : (empty($name));
@@ -483,28 +495,110 @@ class ProcessImportJob implements ShouldQueue
             DB::table('temporary_asset_imports')->insert($resultsChunk);
         }
 
-        $this->setProgress('completed', $processedRows, $processedRows);
+        $this->setProgress('completed', $processedRows, $processedRows, skipped: $skippedRows);
 
         Log::info('ProcessImportJob completed.', [
             'user_id'     => $this->userId,
             'rows'        => $processedRows,
+            'skipped'     => $skippedRows,
             'property_id' => $propertyId,
         ]);
     }
 
     /**
-     * Quickly count data rows in the target sheet without performing any mapping or DB work.
+     * The combined value of one target field for one row.
      *
-     * Opens a separate reader instance, skips the header row, and counts non-empty rows.
-     * This is a lightweight pass (no regex, no transformation) used only to establish
-     * the total for the progress bar.
+     * Lifted out of processFile()'s loop so countDataRows() can reach it. The two
+     * passes have to agree on which rows count as data, and the only way to
+     * guarantee that is for both to ask the same method rather than each carrying
+     * its own idea of "non-empty".
      */
-    private function countDataRows(
+    private function combinedValue(
+        string $fieldId,
+        array $mapping,
+        array $header,
+        array $headerColumns,
+        array $cells
+    ): string {
+        $mapInfo = $mapping[$fieldId] ?? null;
+        if (!$mapInfo || empty($mapInfo['columns'])) return '';
+
+        $vals = [];
+        foreach ($mapInfo['columns'] as $colName) {
+            // header_columns is keyed by the column's real position, so a hit
+            // returns the index to read directly. Falling back to the raw header
+            // keeps pre-existing import sessions working.
+            $colIdx = !empty($headerColumns)
+                ? array_search($colName, $headerColumns, true)
+                : array_search($colName, $header);
+
+            if ($colIdx !== false && isset($cells[$colIdx]) && $cells[$colIdx] !== '') {
+                $vals[] = $cells[$colIdx];
+            }
+        }
+
+        return implode($mapInfo['separator'] ?? ' ', $vals);
+    }
+
+    /**
+     * Whether a row carries anything in any column mapped to a target field.
+     *
+     * 'ignored' is a zone in the mapping payload like any other, holding the
+     * columns the user dropped there — it must be excluded or a note parked in an
+     * ignored column would keep an otherwise blank row alive. AssetImportController
+     * excludes it the same way when it checks that at least one field is mapped.
+     *
+     * Emptiness is '' after coerceToString(), which trims strings and turns null
+     * into '' — the pipeline's one definition, not a second one written here.
+     *
+     * Decided on raw mapped values, deliberately before any per-user adjustment:
+     * processFile() blanks the department hint for non-executives, and countDataRows()
+     * has no user at all, so testing the post-adjustment value would put the two
+     * passes back out of step.
+     */
+    private function rowHasMappedValue(
+        array $mapping,
+        array $header,
+        array $headerColumns,
+        array $cells
+    ): bool {
+        foreach (array_keys($mapping) as $fieldId) {
+            if ($fieldId === 'ignored') {
+                continue;
+            }
+
+            if ($this->combinedValue($fieldId, $mapping, $header, $headerColumns, $cells) !== '') {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Count the rows the import will actually stage, for the progress bar.
+     *
+     * A second pass over the same file: it opens its own reader, finds the header
+     * the same way processFile() does, and counts the rows after it.
+     *
+     * It applies the mapping, which a pre-count would rather not have to do. It has
+     * no choice: the import stages a row only when some mapped column holds a value,
+     * so a count that used any looser rule — "any non-empty cell", as this did —
+     * would size the bar against rows that never arrive, and the run would end
+     * short of 100% by however many blank rows the file happened to have. Both
+     * passes call rowHasMappedValue(); neither owns a copy of the rule.
+     *
+     * Protected, not private, so that agreement can be asserted directly rather
+     * than inferred from a progress record the completed run overwrites.
+     */
+    protected function countDataRows(
         string $fullPath,
         string $extension,
         int $targetSheet,
         array $expectedHeader,
         ?int $headerRowIndex = null,
+        array $mapping = [],
+        array $headerColumns = [],
     ): int {
         $options = $extension === 'csv'
             ? new \OpenSpout\Reader\CSV\Options()
@@ -515,9 +609,9 @@ class ProcessImportJob implements ShouldQueue
 
         $reader->open($fullPath);
 
-        $count       = 0;
-        $headerFound = false;
-        $sheetIndex  = 0;
+        $count      = 0;
+        $header     = null;
+        $sheetIndex = 0;
 
         foreach ($reader->getSheetIterator() as $sheet) {
             if ($sheetIndex !== $targetSheet) {
@@ -528,22 +622,23 @@ class ProcessImportJob implements ShouldQueue
             $rowNumber = 0;
 
             foreach ($sheet->getRowIterator() as $row) {
-                // This pass only sizes the progress bar, but it runs BEFORE the
-                // import loop — so its cast is the first thing any cell meets. It
-                // used to be a bare (string), with none of processFile()'s guards,
-                // which meant one date-formatted cell anywhere in the sheet threw
-                // "Object of class DateTimeImmutable could not be converted to
-                // string" and ended the job with zero rows written.
-                $cells = array_map(fn ($v) => $this->coerceToString($v), $row->toArray());
+                // This pass runs BEFORE the import loop, so its cast is the first
+                // thing any cell meets. It used to be a bare (string), with none of
+                // processFile()'s guards, which meant one date-formatted cell
+                // anywhere in the sheet threw "Object of class DateTimeImmutable
+                // could not be converted to string" and ended the job with zero rows
+                // written. Shared with the import loop for the same reason the row
+                // rule below is.
+                $cells = $this->rowToStrings($row);
 
                 $currentRow = $rowNumber++;
 
-                if (!$headerFound) {
+                if ($header === null) {
                     // Must mirror processFile()'s rule exactly, or the progress bar
                     // counts against a different data offset than the one imported.
                     if ($headerRowIndex !== null) {
                         if ($currentRow === $headerRowIndex) {
-                            $headerFound = true;
+                            $header = $cells;
                         }
                         continue;
                     }
@@ -554,13 +649,16 @@ class ProcessImportJob implements ShouldQueue
                         : $nonEmpty;
 
                     if ($overlap >= 2 || ($nonEmpty >= 2 && empty($expectedHeader))) {
-                        $headerFound = true;
+                        $header = $cells;
                     }
                     continue;
                 }
 
-                // Count rows that have at least one non-empty cell
-                if (count(array_filter($cells)) > 0) {
+                // The header row is kept above, rather than just flagged, because
+                // this is what needs it: without header_columns (an import session
+                // started before that shipped) combinedValue() resolves a mapped
+                // column name against the raw header row.
+                if ($this->rowHasMappedValue($mapping, $header, $headerColumns, $cells)) {
                     $count++;
                 }
             }

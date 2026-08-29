@@ -3940,6 +3940,478 @@ class SmartImportTest extends TestCase
 
         return preg_match('/<option value="([^"]*)"\s+selected/', $select, $m) ? $m[1] : null;
     }
+
+    // ══════════════════════════════════════════════════════════════
+    // 17. EMPTY-ROW DROP (a row counts only for the columns you mapped)
+    // ══════════════════════════════════════════════════════════════
+
+    /** Write arbitrary CSV text at a path processMapping() will accept. */
+    private function seedRawImportFile(string $hexId, string $csv): string
+    {
+        $path = 'temp/import_' . $hexId . '.csv';
+        \Illuminate\Support\Facades\Storage::disk('local')->put($path, $csv);
+
+        return $path;
+    }
+
+    /**
+     * Tag and Name are mapped; Notes is dropped in the Ignored zone.
+     *
+     * 'ignored' is a real key in the payload the mapping page posts — it is where
+     * the columns the user dragged out of the import live — so a rule that walked
+     * the mapping blindly would treat a note as data.
+     */
+    private function mappingPayloadWithIgnoredNotes(string $tempFilePath): array
+    {
+        return [
+            'temp_file_path' => $tempFilePath,
+            'selected_sheet' => 0,
+            'mapping'        => [
+                'tag'     => ['columns' => ['Tag'], 'separator' => ' '],
+                'name'    => ['columns' => ['Name'], 'separator' => ' '],
+                'ignored' => ['columns' => ['Notes'], 'separator' => ''],
+            ],
+        ];
+    }
+
+    /** Rows this user actually has in staging, oldest first. */
+    private function stagedRowsForUserA(): array
+    {
+        return \DB::table('temporary_asset_imports')
+            ->where('user_id', $this->userA->id)
+            ->orderBy('id')
+            ->get()
+            ->map(fn ($row) => (array) $row)
+            ->all();
+    }
+
+    public function test_a_row_with_data_only_in_an_ignored_column_is_not_staged(): void
+    {
+        $this->actingAs($this->userA);
+
+        // Row 2 is the case: it has text, but only in a column the user said not to
+        // import. That is not a row of asset data, it is a leftover annotation.
+        $path = $this->seedRawImportFile('drop01', implode("\n", [
+            'Tag,Name,Notes',
+            'A-1,Alpha,first',
+            ',,checked by Budi',
+            'A-2,Beta,',
+        ]) . "\n");
+
+        $this->seedImportState($path);
+        $this->seedProgress('attempt-drop-1');
+
+        (new ProcessImportJob(
+            $this->userA->id,
+            $path,
+            $this->mappingPayloadWithIgnoredNotes($path),
+            0,
+            'attempt-drop-1',
+        ))->handle();
+
+        $staged = $this->stagedRowsForUserA();
+
+        $this->assertCount(2, $staged, 'A row whose only value sat in an ignored column was staged.');
+        $this->assertSame(['A-1', 'A-2'], array_column($staged, 'tag'));
+    }
+
+    /**
+     * The other half of the rule, and the case the old hardcoded test got wrong.
+     *
+     * The previous check dropped a row unless Tag, Name, Category or Serial Number
+     * was filled — so a row carrying only Remarks was discarded even though the
+     * user had explicitly mapped that column. Mapped means mapped.
+     */
+    public function test_a_row_with_one_mapped_value_survives_even_without_a_name(): void
+    {
+        $this->actingAs($this->userA);
+
+        $path = $this->seedRawImportFile('drop02', implode("\n", [
+            'Tag,Name,Remarks',
+            'A-1,Alpha,fine',
+            ',,needs a tag assigned',
+        ]) . "\n");
+
+        $this->seedImportState($path);
+        $this->seedProgress('attempt-drop-2');
+
+        (new ProcessImportJob(
+            $this->userA->id,
+            $path,
+            [
+                'temp_file_path' => $path,
+                'selected_sheet' => 0,
+                'mapping'        => [
+                    'tag'     => ['columns' => ['Tag'], 'separator' => ' '],
+                    'name'    => ['columns' => ['Name'], 'separator' => ' '],
+                    'remarks' => ['columns' => ['Remarks'], 'separator' => ' '],
+                ],
+            ],
+            0,
+            'attempt-drop-2',
+        ))->handle();
+
+        $staged = $this->stagedRowsForUserA();
+
+        $this->assertCount(2, $staged, 'A row whose only mapped value was Remarks was dropped.');
+        $this->assertSame('needs a tag assigned', $staged[1]['remarks']);
+        $this->assertSame('', $staged[1]['name']);
+    }
+
+    /**
+     * The progress bar's denominator and the staging table must be the same number.
+     *
+     * countDataRows() is a second pass over the same file, and it used to select
+     * rows by a rule of its own — "any non-empty cell" — which counted both the
+     * ignored-only row and the blank one below. The bar was then sized against rows
+     * that never arrived and the import finished short of 100%.
+     *
+     * The file below carries every shape at once so one assertion covers them all.
+     */
+    public function test_the_progress_total_matches_what_lands_in_staging(): void
+    {
+        $this->actingAs($this->userA);
+
+        $path = $this->seedRawImportFile('drop03', implode("\n", [
+            'Tag,Name,Notes',
+            'A-1,Alpha,first',
+            ',,ignored-only',
+            ',,',
+            'A-2,,',
+            ',Gamma,also ignored text',
+        ]) . "\n");
+
+        $this->seedImportState($path);
+        $this->seedProgress('attempt-drop-3');
+
+        $payload = $this->mappingPayloadWithIgnoredNotes($path);
+
+        // Read the pre-count first: a completed run deletes the temp file.
+        $probe = new ProcessImportJobCountProbe(
+            $this->userA->id,
+            $path,
+            $payload,
+            0,
+            'attempt-drop-3',
+        );
+
+        $preCount = $probe->count(
+            \Illuminate\Support\Facades\Storage::disk('local')->path($path),
+            'csv',
+            0,
+            ['Tag', 'Name'],
+            null,
+            $payload['mapping'],
+            [],
+        );
+
+        (new ProcessImportJob(
+            $this->userA->id,
+            $path,
+            $payload,
+            0,
+            'attempt-drop-3',
+        ))->handle();
+
+        $stagedCount = count($this->stagedRowsForUserA());
+
+        $this->assertSame(3, $stagedCount, 'Expected only the three rows with a mapped value.');
+        $this->assertSame(
+            $stagedCount,
+            $preCount,
+            'The progress-bar total disagrees with the number of rows actually staged.'
+        );
+    }
+
+    public function test_the_review_page_reports_how_many_rows_were_skipped(): void
+    {
+        $this->actingAs($this->userA);
+
+        $path = $this->seedRawImportFile('drop04', implode("\n", [
+            'Tag,Name,Notes',
+            'A-1,Alpha,first',
+            ',,ignored-only',
+            ',,',
+            'A-2,Beta,',
+        ]) . "\n");
+
+        $this->seedImportState($path);
+        $this->seedProgress('attempt-drop-4');
+
+        (new ProcessImportJob(
+            $this->userA->id,
+            $path,
+            $this->mappingPayloadWithIgnoredNotes($path),
+            0,
+            'attempt-drop-4',
+        ))->handle();
+
+        $this->assertSame(2, Cache::get('import_progress_' . $this->userA->id)['skipped'] ?? null);
+
+        $this->get(route('assets.import-review'))
+            ->assertStatus(200)
+            ->assertSee(__('assets.import_skipped_blank_rows', ['count' => '2']));
+    }
+
+    /** No drops, no banner — the notice must not become background noise. */
+    public function test_the_review_page_stays_quiet_when_nothing_was_skipped(): void
+    {
+        $this->actingAs($this->userA);
+
+        $path = $this->seedRawImportFile('drop05', implode("\n", [
+            'Tag,Name,Notes',
+            'A-1,Alpha,first',
+            'A-2,Beta,second',
+        ]) . "\n");
+
+        $this->seedImportState($path);
+        $this->seedProgress('attempt-drop-5');
+
+        (new ProcessImportJob(
+            $this->userA->id,
+            $path,
+            $this->mappingPayloadWithIgnoredNotes($path),
+            0,
+            'attempt-drop-5',
+        ))->handle();
+
+        $this->get(route('assets.import-review'))
+            ->assertStatus(200)
+            ->assertDontSee(__('assets.import_skipped_blank_rows', ['count' => '2']));
+    }
+
+    /**
+     * The drop is also announced *before* it happens, on the mapping page, while
+     * the mapping is still editable — which is the only moment it can be acted on.
+     * Dragging a column back out of Ignored can make a row stop being dropped, so
+     * the marking is computed from live Alpine state over the preview rows already
+     * in the page, not re-fetched.
+     */
+    public function test_the_mapping_preview_marks_rows_the_import_will_drop(): void
+    {
+        $this->actingAs($this->userA);
+        $this->seedBannerFile('ba0009');
+
+        $html = $this->get(route('assets.import-mapping'))->assertStatus(200)->getContent();
+
+        $this->assertStringContainsString('rowWillBeDropped(row)', $html);
+        $this->assertStringContainsString('droppedPreviewCount', $html);
+        $this->assertStringContainsString(__('assets.preview_row_will_be_skipped'), $html);
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // 18. FORMULA CELLS (stage what Excel computed, not the formula)
+    // ══════════════════════════════════════════════════════════════
+
+    /**
+     * A minimal XLSX, written by hand.
+     *
+     * It has to be by hand. OpenSpout's own writer emits a formula cell as
+     * `<f>…</f>` with NO `<v>` sibling (Writer/XLSX/Manager/WorksheetManager.php),
+     * so a fixture built with it round-trips to a null computed value and this test
+     * would pass no matter what the reader did. Excel writes both nodes — the
+     * formula source AND the value it last calculated — and that pairing is the
+     * entire subject of these tests, so the file has to contain it.
+     *
+     * Parts are the minimum OpenSpout will open: content types, the package and
+     * workbook relationships, the workbook, a stylesheet, and one worksheet.
+     * Literal cells use t="inlineStr" so no sharedStrings part is needed.
+     *
+     * Formula cells here mirror what Excel produces:
+     *   - a text result is t="str" with the result in <v>
+     *   - a numeric result carries no t attribute (numeric is the default)
+     *
+     * @return string the path of the file on the faked local disk
+     */
+    private function seedFormulaWorkbook(string $hexId): string
+    {
+        $sheet = <<<'XML'
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+<sheetData>
+<row r="1"><c r="A1" t="inlineStr"><is><t>Tag</t></is></c><c r="B1" t="inlineStr"><is><t>Name</t></is></c><c r="C1" t="inlineStr"><is><t>Purchase Cost</t></is></c></row>
+<row r="2"><c r="A2" t="inlineStr"><is><t>F-1</t></is></c><c r="B2" t="str"><f>CONCATENATE("Laptop"," ","Dell")</f><v>Laptop Dell</v></c><c r="C2"><f>SUM(1200,300)</f><v>1500</v></c></row>
+<row r="3"><c r="A3" t="inlineStr"><is><t>F-2</t></is></c><c r="B3" t="inlineStr"><is><t>Monitor LG</t></is></c><c r="C3"><v>750</v></c></row>
+</sheetData>
+</worksheet>
+XML;
+
+        $parts = [
+            '[Content_Types].xml' => '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                . '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+                . '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+                . '<Default Extension="xml" ContentType="application/xml"/>'
+                . '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+                . '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+                . '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>'
+                . '</Types>',
+            '_rels/.rels' => '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                . '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                . '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
+                . '</Relationships>',
+            'xl/workbook.xml' => '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                . '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"'
+                . ' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+                . '<sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets>'
+                . '</workbook>',
+            'xl/_rels/workbook.xml.rels' => '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                . '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                . '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>'
+                . '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>'
+                . '</Relationships>',
+            'xl/styles.xml' => '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                . '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+                . '<numFmts count="0"/>'
+                . '<cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs>'
+                . '</styleSheet>',
+            'xl/worksheets/sheet1.xml' => $sheet,
+        ];
+
+        $scratch = tempnam(sys_get_temp_dir(), 'formula_xlsx_');
+        $zip     = new \ZipArchive;
+        $this->assertTrue(
+            $zip->open($scratch, \ZipArchive::OVERWRITE) === true,
+            'Could not open the scratch archive for the formula fixture.'
+        );
+        foreach ($parts as $name => $contents) {
+            $zip->addFromString($name, $contents);
+        }
+        $zip->close();
+
+        $path = 'temp/import_' . $hexId . '.xlsx';
+        \Illuminate\Support\Facades\Storage::disk('local')->put($path, file_get_contents($scratch));
+        @unlink($scratch);
+
+        return $path;
+    }
+
+    /** Mapping over the three columns seedFormulaWorkbook() writes. */
+    private function formulaMappingPayload(string $tempFilePath): array
+    {
+        return [
+            'temp_file_path' => $tempFilePath,
+            'selected_sheet' => 0,
+            'mapping'        => [
+                'tag'            => ['columns' => ['Tag'], 'separator' => ' '],
+                'name'           => ['columns' => ['Name'], 'separator' => ' '],
+                'purchase_cost'  => ['columns' => ['Purchase Cost'], 'separator' => ' '],
+            ],
+        ];
+    }
+
+    private function importFormulaWorkbook(string $hexId, string $attemptId): void
+    {
+        $path = $this->seedFormulaWorkbook($hexId);
+
+        Cache::put('import_state_' . $this->userA->id, [
+            'temp_file_path'      => $path,
+            'sheets'              => ['Sheet1'],
+            'true_header'         => ['Tag', 'Name', 'Purchase Cost'],
+            'preview_data'        => [],
+            'mapping_proposals'   => [],
+            'current_sheet_index' => 0,
+        ], 1800);
+
+        $this->seedProgress($attemptId);
+
+        (new ProcessImportJob(
+            $this->userA->id,
+            $path,
+            $this->formulaMappingPayload($path),
+            0,
+            $attemptId,
+        ))->handle();
+    }
+
+    /**
+     * The headline case: a Name column filled with =CONCATENATE(...) staged the
+     * formula text, so every asset was named after its own formula.
+     *
+     * Nothing evaluates the formula. Excel already did, and cached the answer next
+     * to it in the file; the reader parses it and hands it over on FormulaCell —
+     * the old code just called getValue(), which is the formula source, instead of
+     * getComputedValue().
+     */
+    public function test_a_formula_cell_stages_its_computed_value_not_the_formula(): void
+    {
+        $this->actingAs($this->userA);
+
+        $this->importFormulaWorkbook('f00d01', 'attempt-formula-1');
+
+        $staged = $this->stagedRowsForUserA();
+
+        $this->assertCount(2, $staged, 'The formula workbook did not import both rows.');
+        $this->assertSame('Laptop Dell', $staged[0]['name']);
+        $this->assertStringNotContainsString('=', $staged[0]['name']);
+        $this->assertStringNotContainsString('CONCATENATE', $staged[0]['name']);
+
+        // The literal cell on the next row is untouched by any of this.
+        $this->assertSame('Monitor LG', $staged[1]['name']);
+    }
+
+    /** A numeric formula has to land as a number the cost column will accept. */
+    public function test_a_numeric_formula_stages_the_cached_number(): void
+    {
+        $this->actingAs($this->userA);
+
+        $this->importFormulaWorkbook('f00d02', 'attempt-formula-2');
+
+        $staged = $this->stagedRowsForUserA();
+
+        $this->assertSame(1500.0, (float) $staged[0]['purchase_cost']);
+        $this->assertSame(750.0, (float) $staged[1]['purchase_cost']);
+
+        // And no coercion note: a formula result is a clean value, not a salvage.
+        $this->assertNull($staged[0]['_coercion_notes']);
+    }
+
+    /**
+     * peek() feeds the mapping page's Live Preview. If it read formulas differently
+     * from the import, the user would map a column showing '=CONCATENATE(...)' and
+     * get 'Laptop Dell' — or the reverse. Both now come through one helper.
+     */
+    public function test_the_mapping_preview_shows_a_formulas_computed_value(): void
+    {
+        $path = $this->seedFormulaWorkbook('f00d03');
+
+        $result = (new AssetImportService)->peek(
+            \Illuminate\Support\Facades\Storage::disk('local')->path($path),
+            'xlsx'
+        );
+
+        $this->assertSame(['Tag', 'Name', 'Purchase Cost'], array_values($result['true_header']));
+        $this->assertSame('Laptop Dell', $result['preview_data'][0]['Name']);
+        $this->assertSame('1500', $result['preview_data'][0]['Purchase Cost']);
+    }
+}
+
+/**
+ * countDataRows() sizes the progress bar, and its whole contract is that it agrees
+ * with the import loop about which rows are data. That agreement is what the test
+ * using this probe asserts, so it needs the number directly rather than inferring
+ * it from a progress record the run overwrites on completion.
+ */
+class ProcessImportJobCountProbe extends \App\Jobs\ProcessImportJob
+{
+    public function count(
+        string $fullPath,
+        string $extension,
+        int $targetSheet,
+        array $expectedHeader,
+        ?int $headerRowIndex,
+        array $mapping,
+        array $headerColumns,
+    ): int {
+        return $this->countDataRows(
+            $fullPath,
+            $extension,
+            $targetSheet,
+            $expectedHeader,
+            $headerRowIndex,
+            $mapping,
+            $headerColumns,
+        );
+    }
 }
 
 /**

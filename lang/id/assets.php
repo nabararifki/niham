@@ -168,6 +168,10 @@ return [
     'show_error_details'                => 'Lihat Detail',
     'hide_error_details'                => 'Sembunyikan Detail',
     'error_details_label'               => 'Detail teknis',
+    // Baris yang dilewati impor karena tidak ada kolom terpetakan yang berisi
+    'import_skipped_blank_rows'         => ':count baris dilewati: tidak ada isi pada kolom mana pun yang Anda petakan. Isi pada kolom yang diabaikan tidak dihitung.',
+    'preview_row_will_be_skipped'       => 'Akan dilewati',
+    'preview_skipped_count'             => ':count dari baris yang ditampilkan akan dilewati — tidak ada isi pada kolom terpetakan.',
 ];
 
 

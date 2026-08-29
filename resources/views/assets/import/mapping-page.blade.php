@@ -252,6 +252,15 @@
             <div class="bg-white/90 dark:bg-gray-800/90 backdrop-blur-md rounded-xl border border-gray-200/50 dark:border-gray-700/50 shadow-sm overflow-hidden mt-6">
                 <div class="px-5 py-4 border-b border-gray-200/50 dark:border-gray-700/50 flex items-center justify-between bg-gray-50/50 dark:bg-gray-800/50">
                     <h3 class="text-sm font-semibold text-gray-700 dark:text-gray-200">{{ __('assets.live_preview') ?? 'Live Preview' }}</h3>
+                    {{-- The import drops a row with nothing in any mapped column. Said
+                         here, while the mapping is still editable, because that is when
+                         it can still be acted on: dragging a column out of Ignored can
+                         make these rows count again, and this recomputes as it happens. --}}
+                    <span x-show="droppedPreviewCount > 0" x-cloak
+                          class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-50 dark:bg-amber-950/30 border border-amber-200/50 dark:border-amber-900/50 text-amber-700 dark:text-amber-400 text-xs font-semibold">
+                        <svg class="w-3.5 h-3.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
+                        <span x-text="@js(__('assets.preview_skipped_count', ['count' => '__COUNT__'])).replace('__COUNT__', droppedPreviewCount)"></span>
+                    </span>
                 </div>
                 <div class="overflow-x-auto">
                     <table class="min-w-full divide-y divide-gray-200/50 dark:divide-gray-700/50 text-sm">
@@ -265,8 +274,15 @@
                         </thead>
                         <tbody class="divide-y divide-gray-200/50 dark:divide-gray-700/50 bg-white dark:bg-gray-800">
                             <template x-for="(row, index) in previewDataRaw" :key="index">
-                                <tr class="hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors">
-                                    <td class="px-4 py-2 text-gray-400 dark:text-gray-500" x-text="index + 1"></td>
+                                <tr class="hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors"
+                                    :class="rowWillBeDropped(row) ? 'opacity-50 bg-gray-50 dark:bg-gray-900/40' : ''">
+                                    <td class="px-4 py-2 text-gray-400 dark:text-gray-500 whitespace-nowrap">
+                                        <span x-text="index + 1"></span>
+                                        <template x-if="rowWillBeDropped(row)">
+                                            <span class="ml-1.5 inline-flex items-center px-1.5 py-0.5 rounded border border-amber-300 dark:border-amber-800 bg-amber-100 dark:bg-amber-900 text-amber-800 dark:text-amber-200 text-[9px] uppercase font-extrabold tracking-wider"
+                                                  title="{{ __('assets.preview_row_will_be_skipped') }}">{{ __('assets.preview_row_will_be_skipped') }}</span>
+                                        </template>
+                                    </td>
                                     <template x-for="field in dbFields" :key="field.id">
                                         <td class="px-4 py-2 text-gray-700 dark:text-gray-200 whitespace-nowrap overflow-hidden text-ellipsis max-w-[250px]">
                                             <template x-if="field.id === 'department' && !isExecutive">
@@ -607,21 +623,40 @@
                     }
                 },
 
+                // What the file itself holds for this field on this row: the mapped
+                // columns joined, '' when nothing is there. No display sugar and no
+                // department substitution — the mirror of the job's combinedValue(),
+                // and the only form usable for deciding whether a row is empty.
+                rawCombinedValue(row, fieldId) {
+                    const mapInfo = this.mapping[fieldId];
+                    if (!mapInfo || mapInfo.columns.length === 0) return '';
+
+                    return mapInfo.columns.map(c => {
+                        let val = row[c];
+                        return (val !== null && val !== undefined) ? String(val).trim() : '';
+                    }).filter(v => v !== '').join(mapInfo.separator);
+                },
+
+                // Mirrors ProcessImportJob::rowHasMappedValue(). dbFields never
+                // contains 'ignored', so a value parked in an ignored column
+                // correctly fails to keep the row alive — which is the whole point
+                // of showing this before the user commits to the mapping.
+                rowWillBeDropped(row) {
+                    return !this.dbFields.some(f => this.rawCombinedValue(row, f.id) !== '');
+                },
+
+                get droppedPreviewCount() {
+                    return this.previewDataRaw.filter(r => this.rowWillBeDropped(r)).length;
+                },
+
                 getCombinedValue(row, fieldId) {
                     if (fieldId === 'department' && !this.isExecutive) {
                         return this.userDepartmentName || '-';
                     }
 
-                    const mapInfo = this.mapping[fieldId];
-                    if (!mapInfo || mapInfo.columns.length === 0) return '-';
-                    
-                    let vals = mapInfo.columns.map(c => {
-                        let val = row[c];
-                        return (val !== null && val !== undefined) ? String(val).trim() : '';
-                    }).filter(v => v !== '');
+                    const value = this.rawCombinedValue(row, fieldId);
 
-                    if (vals.length === 0) return '-';
-                    return vals.join(mapInfo.separator);
+                    return value === '' ? '-' : value;
                 },
 
                 submit() {

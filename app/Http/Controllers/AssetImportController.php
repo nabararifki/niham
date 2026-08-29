@@ -402,6 +402,7 @@ class AssetImportController extends Controller
             'percentage' => 0,
             'processed'  => 0,
             'total'      => 0,
+            'skipped'    => 0,
             'error'      => '',
             'error_hint' => '',
         ];
@@ -883,6 +884,24 @@ class AssetImportController extends Controller
             ->where(function ($q) { $q->whereNotNull('name')->where('name', '<>', ''); })
             ->count();
         $invalidCount = $total - $validCount;
+
+        // Rows the file had and this table does not, because every column the user
+        // mapped was empty for them. Told rather than left for the user to work out
+        // from a row count that does not match their spreadsheet — the same reason
+        // an unreadable cell keeps its raw text and says so instead of vanishing.
+        //
+        // The tally rides the progress record the job already writes. Only a
+        // completed run is read: a record left by an attempt that failed or was
+        // cancelled describes a different import than the rows on screen.
+        $progress = Cache::get('import_progress_' . $userId);
+        if (is_array($progress)
+            && ($progress['status'] ?? '') === 'completed'
+            && (int) ($progress['skipped'] ?? 0) > 0
+        ) {
+            $warning = __('assets.import_skipped_blank_rows', [
+                'count' => number_format((int) $progress['skipped']),
+            ]);
+        }
 
         // Which page numbers contain invalid rows (for the pagination heatmap)
         $invalidPages = $this->invalidPageNumbers($stagingBase, $perPage);

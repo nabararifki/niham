@@ -168,6 +168,10 @@ return [
     'show_error_details'                => 'Show Details',
     'hide_error_details'                => 'Hide Details',
     'error_details_label'               => 'Technical detail',
+    // Rows the import left behind because no mapped column had a value
+    'import_skipped_blank_rows'         => ':count rows were skipped: they had no value in any column you mapped. Values in ignored columns don\'t count.',
+    'preview_row_will_be_skipped'       => 'Will be skipped',
+    'preview_skipped_count'             => ':count of the rows shown will be skipped — no value in any mapped column.',
 ];
 
 
