@@ -439,6 +439,7 @@ class ProcessImportJob implements ShouldQueue
                     'name'             => $name,
                     'category_id'      => null,
                     'department_id'    => !$isExecutive ? $user->department_id : null,
+                    'location'         => $getCombined('location'),
                     'status'           => $status,
                     'model'            => $getCombined('model'),
                     'serial_number'    => $getCombined('serial_number'),

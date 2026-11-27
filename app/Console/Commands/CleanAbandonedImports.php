@@ -2,6 +2,7 @@
 
 namespace App\Console\Commands;
 
+use Carbon\Carbon;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Log;
@@ -34,13 +35,13 @@ class CleanAbandonedImports extends Command
         }
 
         $files        = $disk->files('temp');
-        $now          = time();
+        $now          = Carbon::now('UTC')->timestamp;
         $threshold    = 60 * 60; // 60 minutes
         $deletedCount = 0;
 
         foreach ($files as $file) {
             try {
-                $lastModified = $disk->lastModified($file);
+                $lastModified = (int) $disk->lastModified($file);
                 $age          = $now - $lastModified;
                 if ($age > $threshold) {
                     $disk->delete($file);
@@ -69,7 +70,7 @@ class CleanAbandonedImports extends Command
                               ->orWhere('key', 'like', $prefix . 'import_review_%')
                               ->orWhere('key', 'like', $prefix . 'import_progress_%');
                     })
-                    ->where('expiration', '<', now()->timestamp)
+                    ->where('expiration', '<', Carbon::now('UTC')->timestamp)
                     ->delete();
                 $this->info("Cleaned up {$deletedCount} expired import cache record(s) from database cache table.");
             } catch (\Throwable $e) {
@@ -91,7 +92,7 @@ class CleanAbandonedImports extends Command
     protected function cleanStagingRows(): void
     {
         try {
-            $threshold    = now()->subMinutes(60);
+            $threshold    = Carbon::now('UTC')->subMinutes(60);
             $deletedCount = DB::table('temporary_asset_imports')
                 ->where('created_at', '<', $threshold)
                 ->delete();

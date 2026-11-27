@@ -103,50 +103,86 @@
             </div>
 
             <!-- Table -->
-            <div class="bg-white/90 dark:bg-gray-800/90 backdrop-blur-md rounded-xl border border-gray-200/50 dark:border-gray-700/50 shadow-sm overflow-x-auto mt-6">
-                <table class="min-w-full divide-y divide-gray-200/50 dark:divide-gray-700/50">
-                    <thead class="bg-gray-50/50 dark:bg-gray-800/50">
-                        <tr>
-                            <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-200 uppercase tracking-wider">{{ __('messages.no') }}</th>
-                            <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-200 uppercase tracking-wider">{{ __('messages.name') }}</th>
-                            <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-200 uppercase tracking-wider">{{ __('messages.department') }}</th>
-                            <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-200 uppercase tracking-wider">{{ __('messages.role') }}</th>
-                            @if (Auth::user()->isSuperAdmin())
-                                <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-200 uppercase tracking-wider">{{ __('messages.property') }}</th>
-                            @endif
-                        </tr>
-                    </thead>
-                    <tbody class="divide-y divide-gray-200/50 dark:divide-gray-700/50">
-                        @forelse($users as $user)
-                            <tr class="transition-colors duration-200 hover:bg-gray-50 dark:hover:bg-gray-700/50">
-                                <td class="px-4 py-2 text-sm text-gray-700 dark:text-gray-200">{{ $users->firstItem() + $loop->index }}</td>
-                                <td class="px-4 py-2 text-sm text-accent font-semibold hover:underline">
-                                    <a href="{{ route('users.show',$user) }}">{{ $user->name }}</a>
-                                </td>
-                                <td class="px-4 py-2 text-sm text-gray-700 dark:text-gray-200">{{ optional($user->department)->name ?? '-' }}</td>
-                                <td class="px-4 py-2 text-sm text-gray-700 dark:text-gray-200">{{ optional($user->role)->name ?? '-' }}</td>
-                                @if (Auth::user()->isSuperAdmin())
-                                    <td class="px-4 py-2 text-sm text-gray-700 dark:text-gray-200">
-                                        <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full text-white shadow-sm" style="background-color: {{ optional($user->property)->accent_color ?? '#6b7280' }}">
-                                            {{ optional($user->property)->name ?? '-' }}
-                                        </span>
-                                    </td>
-                                @endif
-                            </tr>
-                        @empty
-                            <tr>
-                                <td colspan="5" class="px-4 py-8 text-center text-gray-500 dark:text-gray-400">
-                                    {{ __('messages.no_data_found') ?? 'No data found' }}
-                                </td>
-                            </tr>
-                        @endforelse
-                    </tbody>
-                </table>
-            </div>
+            @php
+                $canUpdateUsers = Auth::user()->hasPermission('perm_users', 'update');
+                $canDeleteUsers = Auth::user()->hasPermission('perm_users', 'delete');
+                $canBulkManageUsers = $canUpdateUsers || $canDeleteUsers;
+                $canReassignDepartment = Auth::user()->isSuperAdmin() || Auth::user()->isRole('admin') || Auth::user()->hasExecutiveOversight();
 
-            <!-- Pagination -->
-            <div class="mt-4">
-                {{ $users->links() }}
+                $selectableUserIds = collect($users->items())
+                    ->filter(fn ($u) => $u->id !== Auth::id() && ! $u->isSuperAdmin() && $u->name !== 'Admin')
+                    ->pluck('id')
+                    ->map(fn ($id) => (int) $id)
+                    ->values();
+
+                $bulkDepartmentOptions = $departments->map(fn ($d) => ['id' => (int) $d->id, 'name' => $d->name])->values();
+                $bulkRoleOptions = ($bulkRoles ?? $roles)->map(fn ($r) => ['id' => (int) $r->id, 'name' => ucwords($r->name)])->values();
+                $emptyUserColspan = 4 + (Auth::user()->isSuperAdmin() ? 1 : 0);
+            @endphp
+
+            <div class="mt-6">
+                <x-datagrid
+                    :paginator="$users"
+                    :selectable="$canBulkManageUsers"
+                    :selectable-ids="$selectableUserIds"
+                    :bulk-update-url="$canUpdateUsers ? route('users.bulk-update') : null"
+                    :bulk-delete-url="$canDeleteUsers ? route('users.bulk-delete') : null"
+                    :can-delete="$canDeleteUsers"
+                    :options="['departments' => $bulkDepartmentOptions, 'roles' => $bulkRoleOptions]"
+                >
+                    <x-slot:head>
+                        <x-datagrid.th :label="__('messages.name')" />
+                        <x-datagrid.th
+                            :label="__('messages.department')"
+                            :field="$canUpdateUsers && $canReassignDepartment ? 'department_id' : null"
+                            :bulk-type="$canUpdateUsers && $canReassignDepartment ? 'select' : null"
+                            bulk-options="departments"
+                            bulk-width="w-36"
+                        />
+                        <x-datagrid.th
+                            :label="__('messages.role')"
+                            :field="$canUpdateUsers ? 'role_id' : null"
+                            :bulk-type="$canUpdateUsers ? 'select' : null"
+                            bulk-options="roles"
+                            bulk-width="w-36"
+                        />
+                        @if (Auth::user()->isSuperAdmin())
+                            <x-datagrid.th :label="__('messages.property')" />
+                        @endif
+                    </x-slot:head>
+
+                    @forelse($users as $user)
+                        @php
+                            $isProtectedUser = $user->id === Auth::id() || $user->isSuperAdmin() || $user->name === 'Admin';
+                        @endphp
+                        <x-datagrid.row
+                            :row-id="$user->id"
+                            :row-number="$users->firstItem() + $loop->index"
+                            :selectable="$canBulkManageUsers"
+                            :disabled-selection="$isProtectedUser"
+                            :disabled-title="__('messages.protected_account') ?? 'Protected account (cannot bulk-select)'"
+                        >
+                            <td class="px-4 py-2 text-sm text-accent font-semibold hover:underline whitespace-nowrap">
+                                <a href="{{ route('users.show',$user) }}">{{ $user->name }}</a>
+                            </td>
+                            <td class="px-4 py-2 text-sm text-gray-700 dark:text-gray-200 whitespace-nowrap">{{ optional($user->department)->name ?? '-' }}</td>
+                            <td class="px-4 py-2 text-sm text-gray-700 dark:text-gray-200 whitespace-nowrap">{{ optional($user->role)->name ?? '-' }}</td>
+                            @if (Auth::user()->isSuperAdmin())
+                                <td class="px-4 py-2 text-sm text-gray-700 dark:text-gray-200 whitespace-nowrap">
+                                    <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full text-white shadow-sm" style="background-color: {{ optional($user->property)->accent_color ?? '#6b7280' }}">
+                                        {{ optional($user->property)->name ?? '-' }}
+                                    </span>
+                                </td>
+                            @endif
+                        </x-datagrid.row>
+                    @empty
+                        <tr>
+                            <td colspan="{{ $emptyUserColspan }}" class="px-4 py-8 text-center text-gray-500 dark:text-gray-400">
+                                {{ __('messages.no_data_found') ?? 'No data found' }}
+                            </td>
+                        </tr>
+                    @endforelse
+                </x-datagrid>
             </div>
         </div>
     </div>

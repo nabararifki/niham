@@ -138,15 +138,6 @@ return [
     'add_new_role' => 'Add New Role',
     'add_new_property' => 'Add New Property',
     'locations' => 'Locations',
-    'new_location' => 'New Location',
-    'add_new_location' => 'Add New Location',
-    'edit_location' => 'Edit Location',
-    'location_name' => 'Location Name',
-    'location_code' => 'Location Code',
-    'location_details' => 'Location Details',
-    'back_to_locations' => 'Back to Locations',
-    'delete_location' => 'Delete Location',
-    'delete_location_confirm' => 'Are you sure you want to delete this location? This action cannot be undone.',
 
     // --- Auto-Injected Raw Strings ---
     '1 Year' => '1 Year',
@@ -417,6 +408,7 @@ return [
     'ai_scan_details' => '✨ AI Scan Details',
     'asset_tag' => 'Asset Tag',
     'select_or_type_a_new_tag' => 'Select or type a new tag',
+    'select_or_type_a_new_location' => 'Select or type a new location',
     'asset_name' => 'Asset Name',
     'warranty_duration' => 'Warranty Duration',
     'none' => 'None',

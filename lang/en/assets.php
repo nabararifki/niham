@@ -44,6 +44,7 @@ return [
     'name'                              => 'Name',
     'category'                          => 'Category',
     'department'                        => 'Department',
+    'location'                          => 'Location',
     'status'                            => 'Status',
     'model'                             => 'Model',
     'serial_number'                     => 'Serial Number',

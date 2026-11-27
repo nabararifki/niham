@@ -16,7 +16,6 @@ use App\Http\Controllers\QrController;
 use App\Http\Controllers\RoleController;
 use App\Http\Controllers\UserController;
 use App\Http\Controllers\AssetImportController;
-use App\Http\Controllers\LocationController;
 use Illuminate\Support\Facades\Route;
 
 // Redirect home to assets index
@@ -46,12 +45,25 @@ Route::middleware('auth')->group(function () {
     // Asset Management
     Route::controller(AssetController::class)->prefix('assets')->name('assets.')->group(function () {
         Route::get('/export', 'export')->name('export');
+        Route::post('/bulk-update', 'bulkUpdate')->name('bulk-update');
+        Route::post('/bulk-delete', 'bulkDelete')->name('bulk-delete');
         Route::get('/{asset}/history', 'history')->name('history');
         Route::get('/{asset}/history/export', 'exportHistory')->name('history.export');
         Route::post('/{asset}/attachments', 'storeAttachment')->name('attachments.store');
         Route::delete('/attachments/{attachment}', 'destroyAttachment')->name('attachments.destroy');
         Route::get('/{asset}/attachments/download/all', 'downloadAllAttachments')->name('attachments.download-all');
     });
+
+    // User DataGrid Bulk Actions (before Route::resources)
+    Route::controller(UserController::class)->prefix('users')->name('users.')->group(function () {
+        Route::post('/bulk-update', 'bulkUpdate')->name('bulk-update');
+        Route::post('/bulk-delete', 'bulkDelete')->name('bulk-delete');
+    });
+
+    // Master Data DataGrid Bulk Actions (before Route::resources)
+    Route::post('/categories/bulk-delete', [CategoryController::class, 'bulkDelete'])->name('categories.bulk-delete');
+    Route::post('/departments/bulk-delete', [DepartmentController::class, 'bulkDelete'])->name('departments.bulk-delete');
+    Route::post('/roles/bulk-delete', [RoleController::class, 'bulkDelete'])->name('roles.bulk-delete');
 
     // Smart Import Workflow
     Route::controller(AssetImportController::class)->prefix('assets')->name('assets.')->group(function () {
@@ -91,7 +103,6 @@ Route::middleware('auth')->group(function () {
         'assets' => AssetController::class,
         'roles' => RoleController::class,
         'departments' => DepartmentController::class,
-        'locations' => LocationController::class,
         'categories' => CategoryController::class,
         'users' => UserController::class,
         'properties' => PropertyController::class,

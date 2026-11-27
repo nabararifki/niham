@@ -192,6 +192,7 @@ class TenantRestoreService
                     'updated_at' => $now,
                 ]);
             } else {
+                $r = collect($r)->except(['perm_locations'])->toArray();
                 DB::table('roles')->insert($r);
             }
         }
@@ -312,12 +313,13 @@ class TenantRestoreService
             $departmentId = isset($a['department_uuid']) ? ($deptMap[$a['department_uuid']] ?? null) : null;
 
             $row = $this->omit($a, [
-                'attachment', 'histories', 'category_uuid', 'department_uuid',
+                'attachment', 'histories', 'category_uuid', 'department_uuid', 'location_id',
             ]);
 
             $row['property_id'] = $this->property->id;
             $row['category_id'] = $categoryId;
             $row['department_id'] = $departmentId;
+            $row['location'] = $row['location'] ?? null;
             $row['editor'] = null;
             $row['created_at'] = $this->toMySqlDatetime($row['created_at'] ?? $now);
             $row['updated_at'] = $now;
@@ -339,7 +341,7 @@ class TenantRestoreService
                 $assetRows,
                 uniqueBy: ['uuid'],
                 update: [
-                    'tag', 'name', 'category_id', 'department_id', 'status',
+                    'tag', 'name', 'category_id', 'department_id', 'location', 'status',
                     'serial_number', 'model', 'purchase_date', 'warranty_date', 'purchase_cost',
                     'vendor', 'desc', 'remarks', 'deleted_at', 'property_id', 'updated_at',
                 ],

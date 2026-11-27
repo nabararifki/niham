@@ -3,10 +3,12 @@
 namespace App\Http\Controllers;
 
 use App\Models\Department;
+use App\Traits\HandlesDataGridMutations;
 use Illuminate\Http\Request;
 
 class DepartmentController extends Controller
 {
+    use HandlesDataGridMutations;
     // Extra security redundancy
     public function __construct()
     {
@@ -115,5 +117,15 @@ class DepartmentController extends Controller
         $department->delete();
 
         return redirect()->route('departments.index')->with('ok', 'Deleted');
+    }
+
+    /**
+     * Bulk delete departments from the DataGrid.
+     */
+    public function bulkDelete(Request $request)
+    {
+        $this->authorize('delete', Department::class);
+
+        return $this->processBulkDelete($request, new Department());
     }
 }

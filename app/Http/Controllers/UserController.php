@@ -6,6 +6,7 @@ use App\Models\Department;
 use App\Models\Property;
 use App\Models\Role;
 use App\Models\User;
+use App\Traits\HandlesDataGridMutations;
 use Illuminate\Auth\Events\Registered;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
@@ -15,6 +16,8 @@ use Illuminate\Validation\Rules;
 
 class UserController extends Controller
 {
+    use HandlesDataGridMutations;
+
     public function __construct()
     {
         $this->middleware(['auth']);
@@ -67,9 +70,18 @@ class UserController extends Controller
         }
         $departments = $departmentsQuery->get();
         $roles = Role::with('property')->get();
+        $bulkRoles = (! Auth::user()->isSuperAdmin() && ! Auth::user()->isRole('admin'))
+            ? $roles->filter(fn ($r) => strtolower((string) $r->name) !== 'admin')->values()
+            : $roles;
         $properties = Auth::user()->isSuperAdmin() ? Property::all() : collect();
 
-        return view('users.index', ['users' => $users, 'roles' => $roles, 'departments' => $departments, 'properties' => $properties]);
+        return view('users.index', [
+            'users'       => $users,
+            'roles'       => $roles,
+            'bulkRoles'   => $bulkRoles,
+            'departments' => $departments,
+            'properties'  => $properties,
+        ]);
     }
 
     /**
@@ -268,5 +280,87 @@ class UserController extends Controller
         $user->delete();
 
         return redirect()->route('users.index')->with('ok', 'Deleted');
+    }
+
+    /**
+     * AJAX: Bulk reassign department or role for selected user rows from DataGrid.
+     */
+    public function bulkUpdate(Request $request)
+    {
+        return $this->processBulkUpdate(
+            $request,
+            new User(),
+            ['role_id', 'department_id'],
+            [
+                'role_id'       => 'required|integer|min:1',
+                'department_id' => 'required|integer|min:1',
+            ],
+            function ($query): void {
+                $query->where('id', '!=', Auth::id())
+                    ->where('is_super_admin', false)
+                    ->where('name', '!=', 'Admin');
+
+                if (! Auth::user()->isSuperAdmin() && ! Auth::user()->isRole('admin') && ! Auth::user()->hasExecutiveOversight()) {
+                    $query->where('department_id', Auth::user()->department_id);
+                }
+            },
+            function (User $targetUser, string $fieldName, mixed $newValue, array $attributes): array {
+                $id = (int) $newValue;
+
+                if ($fieldName === 'department_id') {
+                    if (! Auth::user()->isSuperAdmin() && ! Auth::user()->isRole('admin') && ! Auth::user()->hasExecutiveOversight() && $id !== (int) Auth::user()->department_id) {
+                        abort(403, 'You can only assign users to your own department.');
+                    }
+
+                    $exists = Department::withoutGlobalScopes()
+                        ->where('id', $id)
+                        ->where('property_id', $targetUser->property_id)
+                        ->exists();
+
+                    if (! $exists) {
+                        abort(422, 'Invalid department for user property.');
+                    }
+                }
+
+                if ($fieldName === 'role_id') {
+                    $role = Role::withoutGlobalScopes()
+                        ->where('id', $id)
+                        ->where('property_id', $targetUser->property_id)
+                        ->first();
+
+                    if (! $role) {
+                        abort(422, 'Invalid role for user property.');
+                    }
+
+                    if (! Auth::user()->isSuperAdmin() && ! Auth::user()->isRole('admin') && strtolower((string) $role->name) === 'admin') {
+                        abort(403, 'You do not have permission to assign the admin role.');
+                    }
+                }
+
+                $attributes[$fieldName] = $id;
+
+                return $attributes;
+            }
+        );
+    }
+
+    /**
+     * AJAX: Bulk delete selected user rows from DataGrid.
+     */
+    public function bulkDelete(Request $request)
+    {
+        return $this->processBulkDelete(
+            $request,
+            new User(),
+            function ($query): void {
+                $query->where('id', '!=', Auth::id())
+                    ->where('is_super_admin', false)
+                    ->where('name', '!=', 'Admin');
+
+                if (! Auth::user()->isSuperAdmin() && ! Auth::user()->isRole('admin') && ! Auth::user()->hasExecutiveOversight()) {
+                    $query->where('department_id', Auth::user()->department_id);
+                }
+            }
+        );
     }
 }

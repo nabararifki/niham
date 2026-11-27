@@ -18,7 +18,6 @@ class Role extends Model
         'perm_users',
         'perm_categories',
         'perm_departments',
-        'perm_locations',
         'perm_roles',
     ];
 

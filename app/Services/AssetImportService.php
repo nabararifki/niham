@@ -24,6 +24,7 @@ class AssetImportService
         'name'          => '/(nama|name|nama\s*aset|asset\s*name|deskripsi|description)/i',
         'category'      => '/(kategori|category|jenis|type|tipe)/i',
         'department'    => '/(departemen|department|dept|bagian|divisi|division)/i',
+        'location'      => '/(lokasi|location|ruang|ruangan|room|tempat|area|floor|lantai)/i',
         'status'        => '/(status|kondisi|condition)/i',
         'serial_number' => '/(serial|seri|serial\s*number|no\s*seri|nomor\s*seri|s\/?n)/i',
         'purchase_date' => '/(tanggal\s*beli|purchase\s*date|tgl\s*beli|date|tanggal)/i',
@@ -443,7 +444,8 @@ class AssetImportService
             'tag' => ['tag', 'kodeaset', 'assettag', 'kode', 'nomoraset', 'assetnumber'],
             'name' => ['nama', 'name', 'namaaset', 'assetname', 'deskripsi', 'description', 'namabarang', 'itemname'],
             'category_id' => ['kategori', 'category', 'jenis', 'type', 'tipe'],
-            'department_id' => ['departemen', 'department', 'dept', 'bagian', 'divisi', 'division', 'lokasi'],
+            'department_id' => ['departemen', 'department', 'dept', 'bagian', 'divisi', 'division'],
+            'location' => ['lokasi', 'location', 'ruang', 'ruangan', 'room', 'tempat', 'area', 'lantai', 'floor'],
             'status' => ['status', 'kondisi', 'condition', 'state'],
             'model' => ['model', 'tipe', 'type', 'merk', 'merek', 'brand', 'pabrikan', 'manufacturer'],
             'serial_number' => ['serial', 'seri', 'serialnumber', 'noseri', 'nomorseri', 'sn', 'imei'],
@@ -467,6 +469,7 @@ class AssetImportService
                 'name' => 'name',
                 'category' => 'category_id',
                 'department' => 'department_id',
+                'location' => 'location',
                 'status' => 'status',
                 'model' => 'model',
                 'serial_number' => 'serial_number',
@@ -754,6 +757,7 @@ class AssetImportService
             'name'             => $get('name'),
             'category_id'      => '', // Will be mapped by user on review page
             'department_id'    => '', // Will be mapped by user on review page
+            'location'         => $get('location'),
             'status'           => $this->normalizeStatus($get('status')),
             'model'            => $combined,
             'serial_number'    => $get('serial_number'),

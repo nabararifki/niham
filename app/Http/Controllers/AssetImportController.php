@@ -36,7 +36,7 @@ class AssetImportController extends Controller
      * the bulk path can't quietly accept something the single path refuses.
      */
     private const EDITABLE_FIELDS = [
-        'tag', 'name', 'category_id', 'department_id', 'status',
+        'tag', 'name', 'category_id', 'department_id', 'location', 'status',
         'model', 'serial_number', 'purchase_date', 'purchase_cost', 'remarks',
     ];
 
@@ -84,6 +84,8 @@ class AssetImportController extends Controller
                 throw new \Exception('Failed to store the uploaded file.');
             }
             $fullPath = Storage::disk('local')->path($path);
+            @chmod(dirname($fullPath), 0775);
+            @chmod($fullPath, 0664);
 
             // Extract sample & true header (Hybrid Pipeline)
             $peekResult = $this->importService->peek($fullPath, $extension);
@@ -304,8 +306,9 @@ class AssetImportController extends Controller
             ], 422);
         }
 
-        // Ensure the temp file is group-readable so the queue worker can access it
+        // Ensure the temp directory and file are group-accessible so the queue worker can read/delete them
         $absolutePath = Storage::disk('local')->path($tempFilePath);
+        @chmod(dirname($absolutePath), 0775);
         @chmod($absolutePath, 0664);
 
         // Verify file is fully readable before handing off
@@ -1474,6 +1477,7 @@ class AssetImportController extends Controller
                     'tag'           => $tag,
                     'category_id'   => $catId,
                     'department_id' => $deptId,
+                    'location'      => !empty(trim((string) ($row->location ?? ''))) ? mb_substr(trim((string) $row->location), 0, 255) : null,
                     'status'        => $row->status ?? 'in_service',
                     'serial_number' => $row->serial_number ?: null,
                     'model'         => $row->model ?: null,

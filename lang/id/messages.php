@@ -138,15 +138,6 @@ return [
     'add_new_role' => 'Tambah Peran Baru',
     'add_new_property' => 'Tambah Properti Baru',
     'locations' => 'Lokasi',
-    'new_location' => 'Lokasi Baru',
-    'add_new_location' => 'Tambah Lokasi Baru',
-    'edit_location' => 'Edit Lokasi',
-    'location_name' => 'Nama Lokasi',
-    'location_code' => 'Kode Lokasi',
-    'location_details' => 'Detail Lokasi',
-    'back_to_locations' => 'Kembali ke Lokasi',
-    'delete_location' => 'Hapus Lokasi',
-    'delete_location_confirm' => 'Apakah Anda yakin ingin menghapus lokasi ini? Tindakan ini tidak dapat dibatalkan.',
 
     // --- Auto-Injected Raw Strings ---
     '1 Year' => '1 Tahun',
@@ -417,6 +408,7 @@ return [
     'ai_scan_details' => '✨ Detail Pemindaian AI',
     'asset_tag' => 'Label Aset',
     'select_or_type_a_new_tag' => 'Pilih atau ketik label baru',
+    'select_or_type_a_new_location' => 'Pilih atau ketik lokasi baru',
     'asset_name' => 'Nama Aset',
     'warranty_duration' => 'Durasi Garansi',
     'none' => 'Tidak Ada',

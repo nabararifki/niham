@@ -3,11 +3,13 @@
 namespace App\Http\Controllers;
 
 use App\Models\Role;
+use App\Traits\HandlesDataGridMutations;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 
 class RoleController extends Controller
 {
+    use HandlesDataGridMutations;
     public function __construct()
     {
         $this->middleware(['auth']);
@@ -53,7 +55,6 @@ class RoleController extends Controller
             'perm_users' => 'nullable|string',
             'perm_categories' => 'nullable|string',
             'perm_departments' => 'nullable|string',
-            'perm_locations' => 'nullable|string',
             'perm_roles' => 'nullable|string',
         ]);
 
@@ -63,7 +64,6 @@ class RoleController extends Controller
             'perm_users' => 'no access',
             'perm_categories' => 'no access',
             'perm_departments' => 'no access',
-            'perm_locations' => 'no access',
             'perm_roles' => 'no access',
         ], array_filter($data));
 
@@ -125,7 +125,6 @@ class RoleController extends Controller
             'perm_users' => 'nullable|string',
             'perm_categories' => 'nullable|string',
             'perm_departments' => 'nullable|string',
-            'perm_locations' => 'nullable|string',
             'perm_roles' => 'nullable|string',
         ]);
 
@@ -135,7 +134,6 @@ class RoleController extends Controller
             'perm_users' => 'no access',
             'perm_categories' => 'no access',
             'perm_departments' => 'no access',
-            'perm_locations' => 'no access',
             'perm_roles' => 'no access',
         ], array_filter($data));
 
@@ -160,5 +158,28 @@ class RoleController extends Controller
         $role->delete();
 
         return redirect()->route('roles.index')->with('ok', 'Deleted');
+    }
+
+    /**
+     * Bulk delete roles from the DataGrid (excluding the protected admin role).
+     */
+    public function bulkDelete(Request $request)
+    {
+        $this->authorize('delete', Role::class);
+
+        return $this->processBulkDelete(
+            $request,
+            new Role(),
+            scopeCallback: function ($query): void {
+                $query->whereRaw('LOWER(name) <> ?', ['admin']);
+            },
+            deleteCallback: function (Role $role): void {
+                if (strtolower($role->name) === 'admin') {
+                    abort(403, 'The admin role cannot be deleted.');
+                }
+
+                $role->delete();
+            }
+        );
     }
 }

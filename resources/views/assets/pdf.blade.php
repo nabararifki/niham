@@ -45,6 +45,7 @@
                 <th>Name</th>
                 <th>Category</th>
                 <th>Department</th>
+                <th>Location</th>
                 <th>Status</th>
                 <th>Serial Number</th>
                 <th>Model</th>
@@ -62,6 +63,7 @@
                 <td style="width: 120px;">{{ $asset->name }}</td>
                 <td style="width: 70px;">{{ $asset->category?->name ?? 'N/A' }}</td>
                 <td style="width: 70px;">{{ $asset->department?->name ?? 'N/A' }}</td>
+                <td style="width: 70px;">{{ $asset->location ?: '-' }}</td>
                 <td style="width: 60px;">{{ str_replace('_', ' ', ucfirst($asset->status)) }}</td>
                 <td style="width: 70px;">{{ $asset->serial_number }}</td>
                 <td style="width: 70px;">{{ $asset->model }}</td>

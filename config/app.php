@@ -15,6 +15,8 @@ return [
 
     'name' => env('APP_NAME', 'NIHAM'),
 
+    'version' => env('APP_VERSION', '0.15.0'),
+
     /*
     |--------------------------------------------------------------------------
     | Application Environment

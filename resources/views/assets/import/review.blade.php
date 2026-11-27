@@ -55,7 +55,8 @@
     {{-- @js, not @json: these happen to be integers today, but @json emits literal
          double quotes for any string value, which would terminate this attribute. --}}
     <div class="py-8"
-         @keydown.escape.window="onEscape()"
+         @datagrid-bulk-updated="onGridBulkUpdated($event.detail)"
+         @datagrid-bulk-deleted="onGridBulkDeleted($event.detail)"
          x-data="importReview({ validCount: @js($validCount), invalidCount: @js($invalidCount), invalidPages: @js($invalidPages), total: @js($total), pageRowIds: @js($pageRowIds), categories: @js($entityOptions['category']), departments: @js($entityOptions['department']) })">
         <div class="max-w-7xl mx-auto sm:px-6 lg:px-8 space-y-6">
 
@@ -134,201 +135,75 @@
                             </div>
                         @endif
 
-                        {{-- ─── Selection Toolbar ──────────────────────────────────────
-                             The touch-accessible path to bulk delete. The context menu is a
-                             shortcut for mouse users, never the only way to get here. --}}
-                        <div x-show="selectionCount > 0" x-cloak
-                             class="mb-4 flex flex-wrap items-center justify-between gap-3 px-4 py-3 rounded-xl bg-accent/10 border border-accent/20">
-                            <div class="flex items-center gap-2 text-sm font-semibold text-accent">
-                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
-                                <span x-text="selectedText"></span>
-                                <span class="font-normal text-xs text-gray-500 dark:text-gray-400 hidden sm:inline">
-                                    · {{ __('assets.selection_page_scoped') }}
-                                </span>
-                            </div>
-                            <div class="flex items-center gap-2">
-                                <span class="text-xs text-gray-500 dark:text-gray-400 hidden md:inline" x-text="bulkHintText"></span>
-                                <button type="button" @click="clearSelection()"
-                                        class="btn btn-xs btn-ghost border border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg">
-                                    {{ __('assets.clear_selection') }}
-                                </button>
-                                <button type="button" @click="requestDeleteSelected()"
-                                        class="btn btn-xs btn-error border-transparent text-white hover:opacity-90 rounded-lg">
-                                    <svg class="w-3.5 h-3.5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
-                                    <span x-text="deleteSelectedText"></span>
-                                </button>
-                            </div>
-                        </div>
+                        {{-- ─── Standardized DataGrid ──────────────────────────────── --}}
+                        @php
+                            $reviewStatuses = [
+                                ['id' => 'in_service', 'name' => __('assets.in_service')],
+                                ['id' => 'out_of_service', 'name' => __('assets.out_of_service')],
+                                ['id' => 'disposed', 'name' => __('assets.disposed')],
+                            ];
+                        @endphp
 
-                        {{-- ─── Data Table ─────────────────────────────────────────── --}}
-                        <div class="overflow-x-auto w-full rounded-xl border border-gray-200/50 dark:border-gray-700/50">
-                            <table class="min-w-full divide-y divide-gray-200/50 dark:divide-gray-700/50 text-sm">
-                                {{-- ─────────────────────────────────────────────────────────────
-                                     While rows are selected each header shrinks its label and
-                                     reveals a bulk-edit widget of the SAME type the column uses
-                                     in a normal row — a select for category/department/status, a
-                                     date picker for purchase_date, and so on. A generic text box
-                                     everywhere would let someone type a category name that can
-                                     never match a category id.
+                        <x-datagrid
+                            :paginator="$paginatedData"
+                            :selectable="true"
+                            :page-row-ids="$pageRowIds"
+                            :bulk-update-url="route('assets.import.bulk-update-rows')"
+                            :bulk-delete-url="route('assets.import.delete-rows')"
+                            :reload-on-bulk-update="false"
+                            :reload-on-bulk-delete="true"
+                            dialog-id="delete_row_modal"
+                            tbody-id="review-tbody"
+                            :options="[
+                                'categories'  => $entityOptions['category'],
+                                'departments' => $entityOptions['department'],
+                                'statuses'    => $reviewStatuses,
+                            ]"
+                            pagination-view="assets.import.partials.pagination"
+                            :pagination-data="['invalidPages' => $invalidPages]"
+                        >
+                            <x-slot:head>
+                                <x-datagrid.th :label="__('assets.tag')" :required="true" field="tag" bulk-type="text" bulk-width="w-32" />
+                                <x-datagrid.th :label="__('assets.name')" :required="true" field="name" bulk-type="text" bulk-width="w-40" />
 
-                                     They commit on @change (blur/Enter, or immediately on pick for
-                                     a select) rather than on debounced input: one deliberate edit
-                                     is one request, instead of every typing pause rewriting a
-                                     column across the whole selection.
-                                ──────────────────────────────────────────────────────────────── --}}
-                                <thead class="bg-gray-50/80 dark:bg-gray-900/80">
-                                    <tr>
-                                        <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 dark:text-gray-300 uppercase tracking-wider w-8 align-top">
-                                            {{-- indeterminate is a DOM property, not an attribute, so it
-                                                 can't be set with a plain :binding — x-effect re-applies
-                                                 it whenever the selection changes. --}}
-                                            <input type="checkbox"
-                                                   x-ref="selectAll"
-                                                   :checked="allSelected"
-                                                   x-effect="$refs.selectAll.indeterminate = someSelected && !allSelected"
-                                                   @change="toggleAll()"
-                                                   aria-label="{{ __('assets.select_all_rows') }}"
-                                                   title="{{ __('assets.select_all_rows') }}"
-                                                   class="rounded border-gray-300 dark:border-gray-600 text-accent focus:ring-accent cursor-pointer">
-                                        </th>
+                                <x-datagrid.th :label="__('assets.category')" :required="true" field="category_id" bulk-type="select" bulk-options="categories" bulk-width="w-36">
+                                    <x-slot:labelExtra>
+                                        @include('assets.import.partials.quick-add-trigger', [
+                                            'entityType'  => 'category',
+                                            'modelClass'  => \App\Models\Category::class,
+                                            'tooltipText' => __('assets.quick_add_category'),
+                                        ])
+                                    </x-slot:labelExtra>
+                                </x-datagrid.th>
 
-                                        @php
-                                            $thClass   = 'px-3 py-3 text-left text-xs font-semibold text-gray-500 dark:text-gray-300 uppercase tracking-wider align-top';
-                                            $bulkInput = 'mt-1.5 block border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:ring-accent focus:border-accent text-xs normal-case font-normal dark:bg-gray-900/50 dark:text-white';
-                                        @endphp
+                                <x-datagrid.th
+                                    :label="__('assets.department')"
+                                    :required="true"
+                                    field="department_id"
+                                    bulk-type="select"
+                                    bulk-options="departments"
+                                    bulk-width="w-36"
+                                    :locked="$lockedDepartmentId !== null"
+                                    :locked-label="$lockedDepartmentName"
+                                    :locked-title="__('assets.auto_assigned_department_warning')"
+                                >
+                                    <x-slot:labelExtra>
+                                        @include('assets.import.partials.quick-add-trigger', [
+                                            'entityType'  => 'department',
+                                            'modelClass'  => \App\Models\Department::class,
+                                            'tooltipText' => __('assets.quick_add_department'),
+                                        ])
+                                    </x-slot:labelExtra>
+                                </x-datagrid.th>
 
-                                        <th class="{{ $thClass }}">
-                                            <div :class="selectionCount > 0 ? 'text-[10px] leading-tight' : ''">{{ __('assets.tag') }} *</div>
-                                            <template x-if="selectionCount > 0">
-                                                <input type="text" @change="bulkUpdate('tag', $event.target.value)"
-                                                       class="{{ $bulkInput }} w-32" />
-                                            </template>
-                                        </th>
-
-                                        <th class="{{ $thClass }}">
-                                            <div :class="selectionCount > 0 ? 'text-[10px] leading-tight' : ''">{{ __('assets.name') }} *</div>
-                                            <template x-if="selectionCount > 0">
-                                                <input type="text" @change="bulkUpdate('name', $event.target.value)"
-                                                       class="{{ $bulkInput }} w-40" />
-                                            </template>
-                                        </th>
-
-                                        {{-- The quick-add trigger sits beside the label, OUTSIDE the
-                                             x-if holding the bulk widget, so it is present in both
-                                             header states — a missing category is worth creating
-                                             whether or not rows happen to be selected right now. --}}
-                                        <th class="{{ $thClass }}">
-                                            <div class="flex items-center gap-1"
-                                                 :class="selectionCount > 0 ? 'text-[10px] leading-tight' : ''">
-                                                <span>{{ __('assets.category') }} *</span>
-                                                @include('assets.import.partials.quick-add-trigger', [
-                                                    'entityType'  => 'category',
-                                                    'modelClass'  => \App\Models\Category::class,
-                                                    'tooltipText' => __('assets.quick_add_category'),
-                                                ])
-                                            </div>
-                                            {{-- Options come from Alpine state, not Blade — see the
-                                                 $entityOptions note at the top of this file. --}}
-                                            <template x-if="selectionCount > 0">
-                                                <select @change="bulkUpdate('category_id', $event.target.value)"
-                                                        class="{{ $bulkInput }} w-36">
-                                                    <option value="">{{ __('assets.select_placeholder') }}</option>
-                                                    <template x-for="option in categories" :key="option.id">
-                                                        <option :value="option.id" x-text="option.name"></option>
-                                                    </template>
-                                                </select>
-                                            </template>
-                                        </th>
-
-                                        <th class="{{ $thClass }}">
-                                            <div class="flex items-center gap-1"
-                                                 :class="selectionCount > 0 ? 'text-[10px] leading-tight' : ''">
-                                                <span>{{ __('assets.department') }} *</span>
-                                                @include('assets.import.partials.quick-add-trigger', [
-                                                    'entityType'  => 'department',
-                                                    'modelClass'  => \App\Models\Department::class,
-                                                    'tooltipText' => __('assets.quick_add_department'),
-                                                ])
-                                            </div>
-                                            {{-- Same lock as the row cells. Without it the bulk widget was a
-                                                 way around a rule the rows enforce — and the endpoint refuses
-                                                 the value anyway, so offering the choice would only render a
-                                                 dropdown whose every option fails. --}}
-                                            <template x-if="selectionCount > 0">
-                                                @if ($lockedDepartmentId !== null)
-                                                    <select disabled
-                                                            data-department-locked
-                                                            title="{{ __('assets.auto_assigned_department_warning') }}"
-                                                            class="{{ $bulkInput }} w-36 bg-gray-100 dark:bg-gray-900/70 text-gray-500 dark:text-gray-400 cursor-not-allowed">
-                                                        <option>{{ $lockedDepartmentName }}</option>
-                                                    </select>
-                                                @else
-                                                    <select @change="bulkUpdate('department_id', $event.target.value)"
-                                                            class="{{ $bulkInput }} w-36">
-                                                        <option value="">{{ __('assets.select_placeholder') }}</option>
-                                                        <template x-for="option in departments" :key="option.id">
-                                                            <option :value="option.id" x-text="option.name"></option>
-                                                        </template>
-                                                    </select>
-                                                @endif
-                                            </template>
-                                        </th>
-
-                                        <th class="{{ $thClass }}">
-                                            <div :class="selectionCount > 0 ? 'text-[10px] leading-tight' : ''">{{ __('assets.status') }}</div>
-                                            <template x-if="selectionCount > 0">
-                                                <select @change="bulkUpdate('status', $event.target.value)"
-                                                        class="{{ $bulkInput }} w-32">
-                                                    <option value="">{{ __('assets.select_placeholder') }}</option>
-                                                    <option value="in_service">{{ __('assets.in_service') }}</option>
-                                                    <option value="out_of_service">{{ __('assets.out_of_service') }}</option>
-                                                    <option value="disposed">{{ __('assets.disposed') }}</option>
-                                                </select>
-                                            </template>
-                                        </th>
-
-                                        <th class="{{ $thClass }}">
-                                            <div :class="selectionCount > 0 ? 'text-[10px] leading-tight' : ''">{{ __('assets.model_brand') }}</div>
-                                            <template x-if="selectionCount > 0">
-                                                <input type="text" @change="bulkUpdate('model', $event.target.value)"
-                                                       class="{{ $bulkInput }} w-32" />
-                                            </template>
-                                        </th>
-
-                                        <th class="{{ $thClass }}">
-                                            <div :class="selectionCount > 0 ? 'text-[10px] leading-tight' : ''">{{ __('assets.serial_number') }}</div>
-                                            <template x-if="selectionCount > 0">
-                                                <input type="text" @change="bulkUpdate('serial_number', $event.target.value)"
-                                                       class="{{ $bulkInput }} w-32" />
-                                            </template>
-                                        </th>
-
-                                        <th class="{{ $thClass }}">
-                                            <div :class="selectionCount > 0 ? 'text-[10px] leading-tight' : ''">{{ __('assets.purchase_date') }}</div>
-                                            <template x-if="selectionCount > 0">
-                                                <input type="date" @change="bulkUpdate('purchase_date', $event.target.value)"
-                                                       class="{{ $bulkInput }} w-36" />
-                                            </template>
-                                        </th>
-
-                                        <th class="{{ $thClass }}">
-                                            <div :class="selectionCount > 0 ? 'text-[10px] leading-tight' : ''">{{ __('assets.purchase_cost') }}</div>
-                                            <template x-if="selectionCount > 0">
-                                                <input type="number" step="any" @change="bulkUpdate('purchase_cost', $event.target.value)"
-                                                       class="{{ $bulkInput }} w-28" />
-                                            </template>
-                                        </th>
-
-                                        <th class="{{ $thClass }}">
-                                            <div :class="selectionCount > 0 ? 'text-[10px] leading-tight' : ''">{{ __('assets.remarks') }}</div>
-                                            <template x-if="selectionCount > 0">
-                                                <input type="text" @change="bulkUpdate('remarks', $event.target.value)"
-                                                       class="{{ $bulkInput }} w-40" />
-                                            </template>
-                                        </th>
-                                    </tr>
-                                </thead>
-                                <tbody id="review-tbody" class="divide-y divide-gray-200/50 dark:divide-gray-700/50 bg-white dark:bg-gray-800">
+                                <x-datagrid.th :label="__('messages.locations') ?? 'Location'" field="location" bulk-type="text" bulk-width="w-32" />
+                                <x-datagrid.th :label="__('assets.status')" field="status" bulk-type="select" bulk-options="statuses" bulk-width="w-32" />
+                                <x-datagrid.th :label="__('assets.model_brand')" field="model" bulk-type="text" bulk-width="w-32" />
+                                <x-datagrid.th :label="__('assets.serial_number')" field="serial_number" bulk-type="text" bulk-width="w-32" />
+                                <x-datagrid.th :label="__('assets.purchase_date')" field="purchase_date" bulk-type="date" bulk-width="w-36" />
+                                <x-datagrid.th :label="__('assets.purchase_cost')" field="purchase_cost" bulk-type="number" bulk-width="w-28" />
+                                <x-datagrid.th :label="__('assets.remarks')" field="remarks" bulk-type="text" bulk-width="w-40" />
+                            </x-slot:head>
 
                                     {{-- ─────────────────────────────────────────────────────────────
                                          N+1 ELIMINATED: $categories and $departments are fetched
@@ -337,95 +212,36 @@
                                     ──────────────────────────────────────────────────────────────── --}}
                                     @forelse($paginatedData as $localIndex => $item)
                                         @php
-                                            // Displayed row number only. Nothing is addressed by it.
                                             $globalIndex = $pageOffset + $localIndex;
-
-                                            // Control names are keyed by the staging row's id, never by
-                                            // its position. Position-keyed names survive a reload as far
-                                            // as the browser is concerned: it restores dirty values onto
-                                            // whatever now sits at that index, so a deleted row's edits
-                                            // reappeared on the row that moved up into its number. An id
-                                            // that is gone matches nothing, which is the point.
                                             $rowKey      = $item['id'];
                                             $combined    = trim(($item['brand'] ?? '') . ' ' . ($item['model'] ?? ''));
                                         @endphp
-                                        {{-- data-row-id is the DOM handle (a future multi-select can
-                                             query [data-row-id]); rowId in the scope is what the
-                                             edit/delete handlers read. Declared once per row so the
-                                             two can never disagree. --}}
-                                        {{-- The four states are spelled out rather than composed from two
-                                             independent class lists, because "selected" and "invalid" both
-                                             set a background: with two lists the winner would be decided by
-                                             Tailwind's output order, not by anything written here. Branching
-                                             guarantees exactly one background class is ever emitted, and
-                                             keeps a selected invalid row visibly still invalid. --}}
-                                        <tr data-row-id="{{ $item['id'] }}"
-                                            x-data="{ rowId: {{ (int) $item['id'] }}, isInvalid: {{ ($item['is_invalid'] ?? false) ? 'true' : 'false' }} }"
-                                            @contextmenu="openRowMenu($event, rowId)"
-                                            :class="isSelected(rowId)
-                                                ? (isInvalid
-                                                    ? 'bg-red-100 dark:bg-red-900/50 border-l-4 border-error ring-2 ring-inset ring-accent/70'
-                                                    : 'bg-accent/10 dark:bg-accent/20 ring-2 ring-inset ring-accent/70')
-                                                : (isInvalid
-                                                    ? 'bg-red-50 dark:bg-red-900/20 border-l-4 border-error'
-                                                    : 'hover:bg-gray-50/50 dark:hover:bg-gray-700/30')"
-                                            class="transition-colors">
-                                            {{-- Row number, which becomes a ticked box while the row is
-                                                 selected. Both states live in this one cell, which is also
-                                                 the click target for toggling the row. --}}
-                                            <td class="px-3 py-2.5 text-xs font-mono cursor-pointer select-none"
-                                                @click="toggleRow(rowId)"
-                                                :class="isSelected(rowId) ? 'text-accent' : 'text-gray-400 dark:text-gray-500'"
-                                                title="{{ __('assets.toggle_row_selection') }}">
-                                                <span x-show="!isSelected(rowId)">{{ number_format($globalIndex + 1) }}</span>
-                                                {{-- x-cloak: selectedIds starts empty, so without it this
-                                                     tick would flash on every row before Alpine boots. --}}
-                                                <span x-show="isSelected(rowId)" x-cloak
-                                                      class="inline-flex items-center justify-center w-4 h-4 rounded bg-accent text-white align-middle"
-                                                      aria-hidden="true">
-                                                    <svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="3" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
-                                                </span>
-
-                                                {{-- A cell whose value could not be converted to its column's
-                                                     type. Amber, not the red invalid styling: these rows are
-                                                     valid and will import — it is only the offending value that
-                                                     gets dropped at save, and until now that happened silently.
-
-                                                     Teleported like the quick-add tooltip: the table sits in an
-                                                     overflow-x-auto wrapper, which computes overflow-y to auto
-                                                     as well and would clip an absolutely-positioned tooltip. --}}
-                                                @if (!empty($coercionNotes[$item['id']] ?? []))
-                                                    <span class="group relative inline-flex align-middle ml-1"
-                                                          x-data="{ tip: false, tx: 0, ty: 0 }"
-                                                          @click.stop
-                                                          @mouseenter="tip = true; tx = $event.clientX; ty = $event.clientY"
-                                                          @mousemove="tx = $event.clientX; ty = $event.clientY"
-                                                          @mouseleave="tip = false">
-                                                        <span tabindex="0"
-                                                              data-coercion-warning="{{ $item['id'] }}"
-                                                              @focus="tip = true; tx = $el.getBoundingClientRect().left; ty = $el.getBoundingClientRect().bottom"
-                                                              @blur="tip = false"
+                                        <x-datagrid.row
+                                            :row-id="$item['id']"
+                                            :row-number="$globalIndex + 1"
+                                            :selectable="true"
+                                            :invalid="(bool) ($item['is_invalid'] ?? false)"
+                                        >
+                                            @if (!empty($coercionNotes[$item['id']] ?? []))
+                                                <x-slot:rowMeta>
+                                                    <x-tooltip width="w-72" class="ml-1 align-middle" @click.stop>
+                                                        <span data-coercion-warning="{{ $item['id'] }}"
                                                               aria-label="{{ __('assets.coercion_row_warning') }}"
-                                                              class="text-amber-500 group-hover:text-amber-600 focus:text-amber-600 transition-colors focus:outline-none">
+                                                              class="text-amber-500 group-hover:text-amber-600 focus:text-amber-600 transition-colors">
                                                             <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                                                                       d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
                                                             </svg>
                                                         </span>
-                                                        <template x-teleport="body">
-                                                            <div role="tooltip" x-show="tip" x-cloak
-                                                                 x-transition.opacity.duration.150ms
-                                                                 class="fixed z-[300] w-72 max-w-[calc(100vw-2rem)] rounded-lg bg-gray-900 dark:bg-gray-700 px-3 py-2 text-xs font-normal normal-case text-left leading-relaxed text-white shadow-2xl ring-1 ring-black/10 pointer-events-none"
-                                                                 :style="`top: ${ty + 18}px; left: ${Math.min(tx + 12, window.innerWidth - 304)}px;`">
-                                                                <p class="font-semibold mb-1">{{ __('assets.coercion_row_warning') }}</p>
-                                                                @foreach ($coercionNotes[$item['id']] as $field => $rawValue)
-                                                                    <p>{{ __('assets.coercion_note_' . ($field === 'purchase_date' ? 'date' : 'cost'), ['value' => $rawValue]) }}</p>
-                                                                @endforeach
-                                                            </div>
-                                                        </template>
-                                                    </span>
-                                                @endif
-                                            </td>
+                                                        <x-slot:content>
+                                                            <p class="font-semibold mb-1">{{ __('assets.coercion_row_warning') }}</p>
+                                                            @foreach ($coercionNotes[$item['id']] as $field => $rawValue)
+                                                                <p>{{ __('assets.coercion_note_' . ($field === 'purchase_date' ? 'date' : 'cost'), ['value' => $rawValue]) }}</p>
+                                                            @endforeach
+                                                        </x-slot:content>
+                                                    </x-tooltip>
+                                                </x-slot:rowMeta>
+                                            @endif
 
                                             {{-- Tag --}}
                                             <td class="px-2 py-2.5 whitespace-nowrap">
@@ -493,6 +309,15 @@
                                                 @endif
                                             </td>
 
+                                            {{-- Location --}}
+                                            <td class="px-2 py-2.5 whitespace-nowrap">
+                                                <input type="text"
+                                                       name="assets[{{ $rowKey }}][location]"
+                                                       value="{{ old('assets.'.$rowKey.'.location', $item['location'] ?? '') }}"
+                                                       @input.debounce.500ms="autoSave('location', $event.target.value, $data)"
+                                                       class="block w-32 border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:ring-accent focus:border-accent text-xs dark:bg-gray-900/50 dark:text-white" />
+                                            </td>
+
                                             {{-- Status --}}
                                             <td class="px-2 py-2.5 whitespace-nowrap">
                                                 <select name="assets[{{ $rowKey }}][status]"
@@ -551,33 +376,15 @@
                                                        class="block w-40 border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:ring-accent focus:border-accent text-xs dark:bg-gray-900/50 dark:text-white" />
                                             </td>
 
-                                        </tr>
+                                        </x-datagrid.row>
                                     @empty
                                         <tr>
-                                            <td colspan="11" class="px-3 py-12 text-center text-sm text-gray-500 dark:text-gray-400">
+                                            <td colspan="12" class="px-3 py-12 text-center text-sm text-gray-500 dark:text-gray-400">
                                                 {{ __('assets.no_data_extracted') }}
                                             </td>
                                         </tr>
                                     @endforelse
-                                </tbody>
-                            </table>
-                        </div>
-
-                        {{-- ─── Pagination Links ────────────────────────────────────── --}}
-                        @if ($paginatedData->hasPages())
-                            <div class="mt-5 flex flex-col sm:flex-row items-center justify-between gap-4">
-                                <p class="text-xs text-gray-500 dark:text-gray-400">
-                                    {{ __('assets.review_page_info', [
-                                        'from'  => number_format($paginatedData->firstItem()),
-                                        'to'    => number_format($paginatedData->lastItem()),
-                                        'total' => number_format($total),
-                                    ]) }}
-                                </p>
-                                <div class="text-sm">
-                                    {{ $paginatedData->links('assets.import.partials.pagination', ['invalidPages' => $invalidPages]) }}
-                                </div>
-                            </div>
-                        @endif
+                        </x-datagrid>
 
                         {{-- ─── Bottom Action Bar ───────────────────────────────────── --}}
                         <div class="mt-6 pt-4 border-t border-gray-200/50 dark:border-gray-700/50 flex flex-wrap justify-between items-center gap-4">
@@ -686,34 +493,7 @@
                  count-aware wording depending on how many rows are selected.
                  A native confirm() can't be styled or localized, which is why this
                  modal exists in the first place. --}}
-            <dialog id="delete_row_modal" class="modal modal-bottom sm:modal-middle backdrop-blur-sm">
-                <div class="modal-box bg-white/95 dark:bg-gray-800/95 backdrop-blur-md border border-gray-200/50 dark:border-gray-700/50 shadow-2xl rounded-2xl p-6 text-gray-900 dark:text-gray-100">
-                    <div class="flex justify-between items-center pb-4 border-b border-gray-200/50 dark:border-gray-700/50 mb-4">
-                        <h3 class="font-bold text-lg text-gray-900 dark:text-white" x-text="deleteTitleText">
-                        </h3>
-                        <form method="dialog">
-                            <button @click="cancelDeleteRow()" class="text-gray-500 hover:text-gray-700 dark:hover:text-gray-300">
-                                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
-                            </button>
-                        </form>
-                    </div>
-
-                    <p class="text-sm text-gray-700 dark:text-gray-300 leading-relaxed my-4" x-text="deleteConfirmText">
-                    </p>
-
-                    <div class="modal-action border-t border-gray-200/50 dark:border-gray-700/50 pt-4 flex justify-end gap-3">
-                        <button type="button" @click="cancelDeleteRow()"
-                                class="btn btn-sm btn-ghost border border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg">
-                            {{ __('messages.cancel') }}
-                        </button>
-                        <button type="button" @click="confirmDeleteRow()"
-                                class="btn btn-sm btn-error border-transparent text-white hover:opacity-90 rounded-lg">
-                            <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
-                            {{ __('messages.yes_delete') }}
-                        </button>
-                    </div>
-                </div>
-            </dialog>
+            {{-- Delete confirmation modal is rendered by <x-datagrid> (<x-confirm-dialog id="delete_row_modal" />) --}}
 
             {{-- Quick Add Category/Department Modal.
 
@@ -804,29 +584,6 @@
                 </div>
             </dialog>
 
-            {{-- Row Context Menu — Blade-rendered and localized, not the native menu.
-                 Positioned at the cursor; openRowMenu() decides whether we're even
-                 allowed to take over the right-click. --}}
-            <div x-show="menuOpen" x-cloak
-                 @click.outside="closeRowMenu()"
-                 @scroll.window="closeRowMenu()"
-                 @resize.window="closeRowMenu()"
-                 :style="`top: ${menuY}px; left: ${menuX}px`"
-                 class="fixed z-50 min-w-[13rem] py-1.5 rounded-xl bg-white/95 dark:bg-gray-800/95 backdrop-blur-md border border-gray-200/50 dark:border-gray-700/50 shadow-2xl text-sm">
-                <div class="px-3 py-1.5 text-xs font-semibold text-gray-400 dark:text-gray-500 border-b border-gray-200/50 dark:border-gray-700/50 mb-1"
-                     x-text="selectedText"></div>
-                <button type="button" @click="requestDeleteSelected()"
-                        class="w-full flex items-center gap-2.5 px-3 py-2 text-left text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors">
-                    <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
-                    <span x-text="deleteSelectedText"></span>
-                </button>
-                <button type="button" @click="clearSelection(); closeRowMenu()"
-                        class="w-full flex items-center gap-2.5 px-3 py-2 text-left text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700/50 transition-colors">
-                    <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
-                    {{ __('assets.clear_selection') }}
-                </button>
-            </div>
-
         </div>{{-- /max-w --}}
     </div>
 
@@ -840,16 +597,8 @@
                 invalidCount: config.invalidCount || 0,
                 invalidPages: config.invalidPages || [],
                 totalRows: config.total || 0,
-                pageRowIds: config.pageRowIds || [],
-                // Backing store for the bulk-edit header selects. Reactive because
-                // those selects sit inside an x-if and get re-cloned from their
-                // template whenever the selection starts and stops.
                 categories: config.categories || [],
                 departments: config.departments || [],
-                selectedIds: [],
-                menuOpen: false,
-                menuX: 0,
-                menuY: 0,
 
                 quickAddType: 'category',
                 quickAddName: '',
@@ -867,84 +616,27 @@
                     return @json(__('assets.preflight_invalid_warning', ['count' => '__COUNT__'])).replace('__COUNT__', Number(this.invalidCount).toLocaleString());
                 },
 
-                // ── Selection ────────────────────────────────────────────────
-                get selectionCount() { return this.selectedIds.length; },
-                get allSelected() {
-                    return this.pageRowIds.length > 0 && this.selectedIds.length === this.pageRowIds.length;
-                },
-                get someSelected() {
-                    return this.selectedIds.length > 0 && !this.allSelected;
-                },
-
-                get selectedText() {
-                    return @json(__('assets.rows_selected', ['count' => '__COUNT__'])).replace('__COUNT__', Number(this.selectionCount).toLocaleString());
-                },
-                get deleteSelectedText() {
-                    return @json(__('assets.delete_selected', ['count' => '__COUNT__'])).replace('__COUNT__', Number(this.selectionCount).toLocaleString());
-                },
-                get bulkHintText() {
-                    return @json(__('assets.bulk_edit_hint', ['count' => '__COUNT__'])).replace('__COUNT__', Number(this.selectionCount).toLocaleString());
-                },
-                get deleteTitleText() {
-                    return this.selectionCount > 1
-                        ? @js(__('assets.delete_rows_title'))
-                        : @js(__('assets.delete_row_title'));
-                },
-                get deleteConfirmText() {
-                    if (this.selectionCount <= 1) return @js(__('assets.delete_row_confirm'));
-                    return @json(__('assets.delete_rows_confirm', ['count' => '__COUNT__'])).replace('__COUNT__', Number(this.selectionCount).toLocaleString());
-                },
-
                 get quickAddTitleText() {
                     return this.quickAddType === 'department'
                         ? @js(__('messages.add_new_department'))
                         : @js(__('messages.add_new_category'));
                 },
 
-                isSelected(rowId) { return this.selectedIds.includes(rowId); },
-
-                toggleRow(rowId) {
-                    const i = this.selectedIds.indexOf(rowId);
-                    if (i === -1) this.selectedIds.push(rowId);
-                    else this.selectedIds.splice(i, 1);
+                onGridBulkUpdated(detail) {
+                    const data = detail?.data || {};
+                    this.validCount = data.validCount ?? this.validCount;
+                    this.invalidCount = data.invalidCount ?? this.invalidCount;
+                    this.totalRows = data.totalCount ?? this.totalRows;
+                    this.invalidPages = data.invalidPages ?? this.invalidPages;
                 },
 
-                toggleAll() {
-                    this.selectedIds = this.allSelected ? [] : [...this.pageRowIds];
+                onGridBulkDeleted(detail) {
+                    const data = detail?.data || {};
+                    this.validCount = data.validCount ?? this.validCount;
+                    this.invalidCount = data.invalidCount ?? this.invalidCount;
+                    this.totalRows = data.totalCount ?? this.totalRows;
+                    this.invalidPages = data.invalidPages ?? this.invalidPages;
                 },
-
-                clearSelection() { this.selectedIds = []; },
-
-                // Escape unwinds one layer at a time: close the menu first, and
-                // only drop the selection once there's no menu left to dismiss.
-                onEscape() {
-                    if (this.menuOpen) { this.closeRowMenu(); return; }
-                    this.clearSelection();
-                },
-
-                // ── Context menu ─────────────────────────────────────────────
-                openRowMenu(e, rowId) {
-                    // Don't steal the browser's own menu from someone working inside a
-                    // field — they're far more likely to want copy/paste than our menu.
-                    // An input that isn't focused is fair game.
-                    const t = e.target;
-                    if (t.matches && t.matches('input, select, textarea') && document.activeElement === t) {
-                        return;
-                    }
-
-                    e.preventDefault();
-
-                    // Right-clicking outside the selection acts on that row alone,
-                    // matching how file managers behave.
-                    if (!this.isSelected(rowId)) this.selectedIds = [rowId];
-
-                    // Keep the menu inside the viewport near the right/bottom edges.
-                    this.menuX = Math.min(e.clientX, window.innerWidth - 230);
-                    this.menuY = Math.min(e.clientY, window.innerHeight - 140);
-                    this.menuOpen = true;
-                },
-
-                closeRowMenu() { this.menuOpen = false; },
 
                 // ── Quick add category / department ──────────────────────────
                 openQuickAdd(entityType) {
@@ -954,7 +646,6 @@
                     this.quickAddNotes     = '';
                     this.quickAddOversight = false;
                     this.quickAddErrors    = {};
-                    this.closeRowMenu();
                     document.getElementById('quick_add_entity_modal').showModal();
                 },
 
@@ -1023,26 +714,16 @@
                     }
                 },
 
-                // Make the new entity selectable everywhere it belongs, without a
-                // reload — a reload would cost the user their page, selection and any
-                // in-flight edits, which is the whole reason this modal exists.
-                //
-                // Two mechanisms, because the two kinds of select differ:
-                //
-                //  - the bulk-edit header select is inside x-if, so Alpine throws its
-                //    DOM away and rebuilds it from the template each time a selection
-                //    starts. Only pushing into the reactive array survives that, and
-                //    when nothing is selected the select does not exist to touch.
-                //  - the per-row selects are plain server-rendered markup that is
-                //    always present, so they are updated in place. Rebuilding them
-                //    from state would mean re-deriving 50 rows' current values.
                 addEntityOption(entity) {
-                    const list = entity.type === 'department' ? this.departments : this.categories;
-
-                    // The server orders by name; insert in place rather than appending
-                    // so the list does not drift out of order mid-session.
+                    const listKey = entity.type === 'department' ? 'departments' : 'categories';
+                    const list = this[listKey];
                     const at = list.findIndex((option) => option.name.localeCompare(entity.name) > 0);
                     list.splice(at === -1 ? list.length : at, 0, { id: entity.id, name: entity.name });
+
+                    this.$dispatch('datagrid-option-added', {
+                        listKey,
+                        option: { id: entity.id, name: entity.name },
+                    });
 
                     document.querySelectorAll(`select[data-entity-select="${entity.type}"]`).forEach((select) => {
                         const option = new Option(entity.name, entity.id);
@@ -1051,146 +732,6 @@
                         );
                         select.add(option, before || null);
                     });
-                },
-
-                // ── Bulk column edit ─────────────────────────────────────────
-                // One request for the whole selection. Fanning this out into a
-                // per-row auto-save would rebuild the request-per-cell cost this
-                // page was already refactored away from.
-                async bulkUpdate(fieldName, newValue) {
-                    if (this.selectionCount === 0) return;
-
-                    try {
-                        const response = await fetch('{{ route("assets.import.bulk-update-rows") }}', {
-                            method: 'POST',
-                            headers: {
-                                'Content-Type': 'application/json',
-                                'X-CSRF-TOKEN': '{{ csrf_token() }}',
-                                'X-Requested-With': 'XMLHttpRequest',
-                                'Accept': 'application/json'
-                            },
-                            body: JSON.stringify({
-                                row_ids: this.selectedIds,
-                                field_name: fieldName,
-                                new_value: newValue
-                            })
-                        });
-
-                        if (!response.ok) {
-                            throw new Error('Bulk update request failed');
-                        }
-
-                        const data = await response.json();
-                        if (!data.success) {
-                            throw new Error(data.message || 'Bulk update failed');
-                        }
-
-                        this.validCount = data.validCount;
-                        this.invalidCount = data.invalidCount;
-                        this.totalRows = data.totalCount;
-                        this.invalidPages = data.invalidPages;
-
-                        // Repaint each affected row's invalid highlighting in place. A
-                        // reload would be simpler but would throw away the selection
-                        // the user is still working with.
-                        this.applyRowFlags(data.rowFlags || {});
-                        this.syncVisibleCells(fieldName, newValue);
-                    } catch (err) {
-                        console.error('Bulk update failed:', err);
-                        {{-- @js, not @json: @json splits on commas and would swallow
-                             the ['message' => ...] argument. Same reasoning as below. --}}
-                        const message = @js(__('assets.bulk_update_error', ['message' => '__MSG__']))
-                            .replace('__MSG__', err.message);
-                        alert(message);
-                    }
-                },
-
-                // The server is the source of truth for is_invalid; push its answer
-                // into each row's own Alpine scope via the DOM node we already tag
-                // with data-row-id. Alpine.$data() is the supported way in — the
-                // _x_dataStack property it wraps is internal and has moved before.
-                applyRowFlags(rowFlags) {
-                    Object.entries(rowFlags).forEach(([id, isInvalid]) => {
-                        const tr = document.querySelector(`tr[data-row-id="${id}"]`);
-                        if (!tr) return;
-                        const scope = Alpine.$data(tr);
-                        if (scope) scope.isInvalid = isInvalid;
-                    });
-                },
-
-                // Mirror the committed value into the per-row inputs so the table
-                // shows what was actually saved without a round trip.
-                syncVisibleCells(fieldName, newValue) {
-                    this.selectedIds.forEach((id) => {
-                        const tr = document.querySelector(`tr[data-row-id="${id}"]`);
-                        if (!tr) return;
-                        const field = tr.querySelector(`[name$="[${fieldName}]"]`);
-                        if (field) field.value = newValue;
-                    });
-                },
-
-                // ── Delete ───────────────────────────────────────────────────
-                // Opens delete_row_modal instead of the browser's native confirm() —
-                // confirm() can't be styled or localized through Blade at all, which is
-                // why it was stuck showing hardcoded Indonesian regardless of locale.
-                requestDeleteSelected() {
-                    if (this.selectionCount === 0) return;
-                    this.closeRowMenu();
-                    document.getElementById('delete_row_modal').showModal();
-                },
-
-                cancelDeleteRow() {
-                    document.getElementById('delete_row_modal').close();
-                },
-
-                async confirmDeleteRow() {
-                    document.getElementById('delete_row_modal').close();
-                    const rowIds = [...this.selectedIds];
-                    if (rowIds.length === 0) return;
-
-                    try {
-                        const response = await fetch('{{ route("assets.import.delete-rows") }}', {
-                            method: 'POST',
-                            headers: {
-                                'Content-Type': 'application/json',
-                                'X-CSRF-TOKEN': '{{ csrf_token() }}',
-                                'X-Requested-With': 'XMLHttpRequest',
-                                'Accept': 'application/json'
-                            },
-                            body: JSON.stringify({
-                                row_ids: rowIds
-                            })
-                        });
-
-                        if (!response.ok) {
-                            throw new Error('Delete request failed');
-                        }
-
-                        const data = await response.json();
-                        if (data.success) {
-                            this.validCount = data.validCount;
-                            this.invalidCount = data.invalidCount;
-                            this.totalRows = data.totalCount;
-                            this.invalidPages = data.invalidPages;
-                            this.clearSelection();
-
-                            // Reload so the # column and pagination re-settle. Row identity
-                            // no longer depends on this — every row carries its own id —
-                            // but the displayed numbering does.
-                            window.location.reload();
-                        }
-                    } catch (err) {
-                        console.error('Delete failed:', err);
-                        {{-- Blade comment (not a // one): a literal "@word(" in a JS comment
-                             here would itself get parsed as a directive, since script blocks
-                             aren't exempt from directive scanning. @js is used because @json
-                             splits its expression on commas, which would swallow the
-                             ['message' => ...] argument as the encoding-flags parameter. --}}
-                        const template = rowIds.length > 1
-                            ? @js(__('assets.delete_rows_error', ['message' => '__MSG__']))
-                            : @js(__('assets.delete_row_error', ['message' => '__MSG__']));
-                        alert(template.replace('__MSG__', err.message));
-                    }
                 },
 
                 async autoSave(fieldName, newValue, trScope) {

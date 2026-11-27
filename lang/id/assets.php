@@ -44,6 +44,7 @@ return [
     'name'                              => 'Nama',
     'category'                          => 'Kategori',
     'department'                        => 'Departemen',
+    'location'                          => 'Lokasi',
     'status'                            => 'Status',
     'model'                             => 'Model',
     'serial_number'                     => 'Nomor Seri',

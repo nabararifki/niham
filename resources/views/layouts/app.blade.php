@@ -73,7 +73,7 @@
 @endphp
 
 <body
-    class="font-sans antialiased bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 transition-colors duration-200 h-screen overflow-hidden">
+    class="font-sans antialiased bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 transition-colors duration-200 h-dvh overflow-hidden">
 
     <!-- Full-viewport locked layout -->
     <div class="flex h-full">
@@ -141,18 +141,6 @@
                     </a>
                 @endcan
 
-                @can('viewAny', App\Models\Location::class)
-                <a href="{{ route('locations.index') }}"
-                    class="flex items-center px-4 py-2.5 text-sm font-medium transition-colors rounded-lg w-full {{ request()->routeIs('locations.*') ? 'text-white' : 'text-gray-700 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-700' }}"
-                    {!! request()->routeIs('locations.*') ? 'style="background-color: var(--property-accent);"' : '' !!}>
-                    <svg class="w-5 h-5 mr-3 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
-                    </svg>
-                    <span class="truncate">{{ __('messages.locations') ?? 'Lokasi' }}</span>
-                </a>
-                @endcan
-
                 @can('viewAny', App\Models\Role::class)
                     <a href="{{ route('roles.index') }}"
                         class="flex items-center px-4 py-2.5 text-sm font-medium transition-colors rounded-lg w-full {{ request()->routeIs('roles.*') ? 'text-white' : 'text-gray-700 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-700' }}"
@@ -165,6 +153,11 @@
                     </a>
                 @endcan
             </nav>
+
+            <div class="mt-auto px-4 py-3 border-t border-gray-200/50 dark:border-gray-700/50 text-xs text-gray-400 dark:text-gray-500 flex items-center justify-between">
+                <span>{{ config('app.name', 'NIHAM') }}</span>
+                <span class="font-mono font-semibold">v{{ config('app.version', '0.15.0') }}</span>
+            </div>
         </aside>
 
         <!-- Right column: nav fixed at top, image only in scroll area -->

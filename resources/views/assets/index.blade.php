@@ -136,77 +136,99 @@
             </div>
 
             <!-- Table -->
-            <div class="bg-white/90 dark:bg-gray-800/90 backdrop-blur-md rounded-xl border border-gray-200/50 dark:border-gray-700/50 shadow-sm overflow-x-auto mt-6">
-                <table class="min-w-full divide-y divide-gray-200/50 dark:divide-gray-700/50">
-                    <thead class="bg-gray-50/50 dark:bg-gray-800/50">
-                        <tr>
-                            <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-200 uppercase tracking-wider">{{ __('messages.no') }}</th>
-                            <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-200 uppercase tracking-wider">{{ __('messages.tag') }}</th>
-                            <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-200 uppercase tracking-wider">{{ __('messages.name') }}</th>
-                            <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-200 uppercase tracking-wider">{{ __('messages.category') }}</th>
-                            <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-200 uppercase tracking-wider">{{ __('messages.department') }}</th>
-                            <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-200 uppercase tracking-wider">{{ __('messages.locations') ?? 'Location' }}</th>
-                            <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-200 uppercase tracking-wider">{{ __('messages.status') }}</th>
+            @php
+                $canUpdateAssets = Auth::user()->can('update', App\Models\Asset::class);
+                $canDeleteAssets = Auth::user()->can('delete', App\Models\Asset::class);
+                $canBulkManageAssets = $canUpdateAssets || $canDeleteAssets;
+                $assetStatusOptions = [
+                    ['id' => 'in_service', 'name' => __('messages.in_service')],
+                    ['id' => 'out_of_service', 'name' => __('messages.out_of_service')],
+                    ['id' => 'disposed', 'name' => __('messages.disposed')],
+                ];
+                $emptyAssetColspan = 8 + (Auth::user()->isSuperAdmin() ? 1 : 0);
+            @endphp
+
+            <div class="mt-6">
+                <x-datagrid
+                    :paginator="$assets"
+                    :selectable="$canBulkManageAssets"
+                    :bulk-update-url="$canUpdateAssets ? route('assets.bulk-update') : null"
+                    :bulk-delete-url="$canDeleteAssets ? route('assets.bulk-delete') : null"
+                    :can-delete="$canDeleteAssets"
+                    :options="['statuses' => $assetStatusOptions]"
+                >
+                    <x-slot:head>
+                        <x-datagrid.th :label="__('messages.tag')" />
+                        <x-datagrid.th :label="__('messages.name')" />
+                        <x-datagrid.th :label="__('messages.category')" />
+                        <x-datagrid.th :label="__('messages.department')" />
+                        <x-datagrid.th
+                            :label="__('messages.locations') ?? 'Location'"
+                            :field="$canUpdateAssets ? 'location' : null"
+                            :bulk-type="$canUpdateAssets ? 'text' : null"
+                            bulk-width="w-36"
+                            :bulk-placeholder="__('messages.select_or_type_a_new_location')"
+                        />
+                        <x-datagrid.th
+                            :label="__('messages.status')"
+                            :field="$canUpdateAssets ? 'status' : null"
+                            :bulk-type="$canUpdateAssets ? 'select' : null"
+                            bulk-options="statuses"
+                            bulk-width="w-32"
+                        />
+                        @if(Auth::user()->isSuperAdmin())
+                            <x-datagrid.th :label="__('messages.property')" />
+                        @endif
+                        <x-datagrid.th :label="__('messages.qr')" />
+                    </x-slot:head>
+
+                    @forelse($assets as $a)
+                        <x-datagrid.row
+                            :row-id="$a->id"
+                            :row-number="$assets->firstItem() + $loop->index"
+                            :selectable="$canBulkManageAssets"
+                        >
+                            <td class="px-4 py-2 text-sm text-gray-700 dark:text-gray-200 whitespace-nowrap">{{ $a->tag }}</td>
+                            <td class="px-4 py-2 text-sm text-accent font-semibold relative whitespace-nowrap">
+                                <x-hover-card :asset="$a">
+                                    <a href="{{ route('assets.show',$a) }}" class="transition-colors hover:underline" :class="hovering ? 'text-red-500 font-bold' : ''">{{ $a->name }}</a>
+                                </x-hover-card>
+                            </td>
+                            <td class="px-4 py-2 text-sm text-gray-700 dark:text-gray-200 whitespace-nowrap">{{ $a->category->name }}</td>
+                            <td class="px-4 py-2 text-sm text-gray-700 dark:text-gray-200 whitespace-nowrap">{{ optional($a->department)->name ?? '-' }}</td>
+                            <td class="px-4 py-2 text-sm text-gray-700 dark:text-gray-200 whitespace-nowrap">{{ $a->location ?: '-' }}</td>
+                            <td class="px-4 py-2 text-sm whitespace-nowrap">
+                                <span class="inline-flex px-2 py-1 text-xs font-semibold rounded-full 
+                                    @if ($a->status == 'in_service')
+                                        bg-green-100 text-green-800
+                                    @elseif ($a->status == 'out_of_service')
+                                        bg-red-100 text-red-800
+                                    @else
+                                        bg-gray-100 text-gray-800 dark:text-gray-200
+                                    @endif
+                                ">
+                                    {{ ucfirst(str_replace('_', ' ', $a->status)) }}
+                                </span>
+                            </td>
                             @if(Auth::user()->isSuperAdmin())
-                                <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-200 uppercase tracking-wider">{{ __('messages.property') }}</th>
-                            @endif
-                            <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-200 uppercase tracking-wider">{{ __('messages.qr') }}</th>
-                        </tr>
-                    </thead>
-                    <tbody class="divide-y divide-gray-200/50 dark:divide-gray-700/50">
-                        @forelse($assets as $a)
-                            <tr class="transition-colors duration-200 hover:bg-gray-50 dark:hover:bg-gray-700/50">
-                                <td class="px-4 py-2 text-sm text-gray-700 dark:text-gray-200">{{ $assets->firstItem() + $loop->index }}</td>
-                                <td class="px-4 py-2 text-sm text-gray-700 dark:text-gray-200">{{ $a->tag }}</td>
-                                <td class="px-4 py-2 text-sm text-accent font-semibold relative">
-                                    <x-hover-card :asset="$a">
-                                        <a href="{{ route('assets.show',$a) }}" class="transition-colors hover:underline" :class="hovering ? 'text-red-500 font-bold' : ''">{{ $a->name }}</a>
-                                    </x-hover-card>
-                                </td>
-                                <td class="px-4 py-2 text-sm text-gray-700 dark:text-gray-200">{{ $a->category->name }}</td>
-                                <td class="px-4 py-2 text-sm text-gray-700 dark:text-gray-200">{{ optional($a->department)->name ?? '-' }}</td>
-                                <td class="px-4 py-2 text-sm text-gray-700 dark:text-gray-200">{{ optional($a->location)->name ?? '-' }}</td>
-                                <td class="px-4 py-2 text-sm">
-                                    <span class="inline-flex px-2 py-1 text-xs font-semibold rounded-full 
-                                        @if ($a->status == 'in_service')
-                                            bg-green-100 text-green-800
-                                        @elseif ($a->status == 'out_of_service')
-                                            bg-red-100 text-red-800
-                                        @else
-                                            bg-gray-100 text-gray-800 dark:text-gray-200
-                                        @endif
-                                    ">
-                                        {{ ucfirst(str_replace('_', ' ', $a->status)) }}
+                                <td class="px-4 py-2 text-sm text-gray-700 dark:text-gray-200 whitespace-nowrap">
+                                    <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full text-white shadow-sm" style="background-color: {{ optional($a->property)->accent_color ?? '#6b7280' }}">
+                                        {{ optional($a->property)->name ?? '-' }}
                                     </span>
                                 </td>
-                                @if(Auth::user()->isSuperAdmin())
-                                    <td class="px-4 py-2 text-sm text-gray-700 dark:text-gray-200">
-                                        <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full text-white shadow-sm" style="background-color: {{ optional($a->property)->accent_color ?? '#6b7280' }}">
-                                            {{ optional($a->property)->name ?? '-' }}
-                                        </span>
-                                    </td>
-                                @endif
-                                {{-- QR --}}
-                                <td class="px-4 py-2">
-                                    <x-qr-modal :asset="$a"/>
-                                </td>
-
-
-                            </tr>
-                        @empty
-                            <tr>
-                                <td colspan="9" class="px-4 py-8 text-center text-gray-500 dark:text-gray-400">
-                                    {{ __('messages.no_data_found') ?? 'No data found' }}
-                                </td>
-                            </tr>
-                        @endforelse
-                    </tbody>
-                </table>
-            </div>
-
-            <!-- Pagination -->
-            <div class="mt-4">
-                {{ $assets->links() }}
+                            @endif
+                            <td class="px-4 py-2 whitespace-nowrap">
+                                <x-qr-modal :asset="$a"/>
+                            </td>
+                        </x-datagrid.row>
+                    @empty
+                        <tr>
+                            <td colspan="{{ $emptyAssetColspan }}" class="px-4 py-8 text-center text-gray-500 dark:text-gray-400">
+                                {{ __('messages.no_data_found') ?? 'No data found' }}
+                            </td>
+                        </tr>
+                    @endforelse
+                </x-datagrid>
             </div>
 
             @if (Auth::user()->isRole('admin') || Auth::user()->isSuperAdmin())

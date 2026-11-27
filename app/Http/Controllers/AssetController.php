@@ -6,7 +6,7 @@ use App\Exports\AssetsExport;
 use App\Models\Asset;
 use App\Models\Category;
 use App\Models\Department;
-use App\Models\Location;
+use App\Traits\HandlesDataGridMutations;
 use Auth;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
@@ -17,6 +17,8 @@ use Storage;
 
 class AssetController extends Controller
 {
+    use HandlesDataGridMutations;
+
     public function __construct()
     {
         $this->middleware(['auth']);
@@ -65,7 +67,7 @@ class AssetController extends Controller
             $query->latest();
         }
 
-        $assets = $query->with(['category', 'department', 'location', 'attachments', 'property'])->paginate(15)->withQueryString();
+        $assets = $query->with(['category', 'department', 'attachments', 'property'])->paginate(15)->withQueryString();
         $categories = Category::with('property')->get();
         $departments = Department::with('property')->get();
 
@@ -82,7 +84,7 @@ class AssetController extends Controller
         return view('assets.create', [
             'categories'   => Category::with('property')->get(),
             'departments'  => Department::with('property')->get(),
-            'locations'    => Location::with('property')->orderBy('name')->get(),
+            'existingLocations' => Asset::select('location')->whereNotNull('location')->where('location', '<>', '')->distinct()->orderBy('location')->pluck('location'),
             'existingTags' => Asset::select('tag')->distinct()->orderBy('tag')->get(),
         ]);
     }
@@ -98,7 +100,7 @@ class AssetController extends Controller
             'name' => 'required|string|max:255',
             'category_id' => 'required|exists:categories,id',
             'department_id' => 'required|exists:departments,id',
-            'location_id' => 'nullable|exists:locations,id',
+            'location' => 'nullable|string|max:255',
             'status' => 'in:in_service,out_of_service,disposed',
             'serial_number' => 'nullable|string|max:255',
             'model' => 'nullable|string|max:255',
@@ -180,7 +182,6 @@ class AssetController extends Controller
         $asset->load([
             'category',
             'department',
-            'location',
             'attachments',
         ]);
         $assetClass = Asset::class;
@@ -207,7 +208,7 @@ class AssetController extends Controller
             'asset'        => $asset,
             'categories'   => Category::with('property')->get(),
             'departments'  => Department::with('property')->get(),
-            'locations'    => Location::with('property')->orderBy('name')->get(),
+            'existingLocations' => Asset::select('location')->whereNotNull('location')->where('location', '<>', '')->distinct()->orderBy('location')->pluck('location'),
             'existingTags' => Asset::select('tag')->distinct()->orderBy('tag')->get(),
         ]);
     }
@@ -223,7 +224,7 @@ class AssetController extends Controller
             'name' => 'required|string|max:255',
             'category_id' => 'required|exists:categories,id',
             'department_id' => 'nullable|exists:departments,id',
-            'location_id' => 'nullable|exists:locations,id',
+            'location' => 'nullable|string|max:255',
             'status' => 'in:in_service,out_of_service,disposed',
             'serial_number' => 'nullable|string|max:255',
             'model' => 'nullable|string|max:255',
@@ -329,6 +330,53 @@ class AssetController extends Controller
         return redirect()->route('assets.index')->with('success', __('messages.asset_deleted'));
     }
 
+    /**
+     * AJAX: Bulk update selected asset rows from DataGrid.
+     */
+    public function bulkUpdate(Request $request)
+    {
+        return $this->processBulkUpdate(
+            $request,
+            new Asset(),
+            ['status', 'location'],
+            [
+                'status'   => 'required|in:in_service,out_of_service,disposed',
+                'location' => 'nullable|string|max:255',
+            ],
+            function ($query): void {
+                if (! Auth::user()->isSuperAdmin() && ! Auth::user()->isRole('admin') && ! Auth::user()->hasExecutiveOversight()) {
+                    $query->where('department_id', Auth::user()->department_id);
+                }
+            },
+            function (Asset $asset, string $fieldName, mixed $newValue, array $attributes): array {
+                if ($fieldName === 'location') {
+                    $trimmed = is_string($newValue) ? trim($newValue) : '';
+                    $attributes['location'] = $trimmed !== '' ? $trimmed : null;
+                }
+                $attributes['editor'] = Auth::id();
+
+                return $attributes;
+            }
+        );
+    }
+
+    /**
+     * AJAX: Bulk delete selected asset rows from DataGrid.
+     */
+    public function bulkDelete(Request $request)
+    {
+        return $this->processBulkDelete(
+            $request,
+            new Asset(),
+            function ($query): void {
+                if (! Auth::user()->isSuperAdmin() && ! Auth::user()->isRole('admin') && ! Auth::user()->hasExecutiveOversight()) {
+                    $query->where('department_id', Auth::user()->department_id);
+                }
+            },
+            fn (Asset $asset) => $asset->forceDelete()
+        );
+    }
+
     public function export(Request $request)
     {
         $query = Asset::query();
@@ -378,7 +426,7 @@ class AssetController extends Controller
             $query->latest();
         }
 
-        $assetsToExport = $query->with(['category', 'department', 'location'])->get();
+        $assetsToExport = $query->with(['category', 'department'])->get();
         $property = Auth::user()->isSuperAdmin() && session('active_property_id') ? \App\Models\Property::find(session('active_property_id'))?->name ?? 'All Properties' : (Auth::user()->isSuperAdmin() ? 'All Properties' : Auth::user()->loadMissing('property')->property->name);
 
         if ($request->input('format') === 'pdf') {

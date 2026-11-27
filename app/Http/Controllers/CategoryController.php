@@ -3,10 +3,12 @@
 namespace App\Http\Controllers;
 
 use App\Models\Category;
+use App\Traits\HandlesDataGridMutations;
 use Illuminate\Http\Request;
 
 class CategoryController extends Controller
 {
+    use HandlesDataGridMutations;
     // Extra security redundancy
     public function __construct()
     {
@@ -109,5 +111,15 @@ class CategoryController extends Controller
         $category->delete();
 
         return redirect()->route('categories.index')->with('ok', 'Deleted');
+    }
+
+    /**
+     * Bulk delete categories from the DataGrid.
+     */
+    public function bulkDelete(Request $request)
+    {
+        $this->authorize('delete', Category::class);
+
+        return $this->processBulkDelete($request, new Category());
     }
 }
